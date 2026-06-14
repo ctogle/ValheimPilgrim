@@ -62,6 +62,7 @@ namespace EnvReporter
         internal static string GrowthFood    => Cfg.Rituals.Items.GetValueOrDefault("growth")?.Item        ?? "AncientSeed";
         internal static string PlayerSeekFood => Cfg.Rituals.Items.GetValueOrDefault("seek_player")?.Item  ?? "Flint";
         internal static string KindleFood    => Cfg.Rituals.Items.GetValueOrDefault("kindle")?.Item        ?? "Resin";
+        internal static string TameFood     => Cfg.Rituals.Items.GetValueOrDefault("tame_flock")?.Item    ?? "BoneFragments";
         // Wildcards: Trophy* → dungeon seek, MeadBase*/GreydwarfEye → clear skies, Mushroom* → restore power
         // (prefix matching stays hardcoded; hover text and messages come from config)
 
@@ -89,6 +90,7 @@ namespace EnvReporter
         internal static float DungeonEnvExpiry     = 0f;
         internal static float HomeEnvExpiry        = 0f;
         internal static bool  GrowthBlessingActive = false;
+        internal static bool  TameBlessingActive   = false;
 
         // Boss trophy → guardian power
         internal static readonly Dictionary<string, string> TrophyToPower = new Dictionary<string, string>
@@ -115,7 +117,8 @@ namespace EnvReporter
                 EnableRaisingEvents = true,
             };
             _cfgWatcher.Changed += (_, __) => _cfgDirty = true;
-            new Harmony("com.curtis.envreporter").PatchAll();
+            try { new Harmony("com.curtis.envreporter").PatchAll(); }
+            catch (System.Exception ex) { Log.LogError($"[Pilgrim] Harmony patch failed: {ex.Message}"); }
             RegisterCommands();
             var go = new GameObject("AthScheduler");
             DontDestroyOnLoad(go);
@@ -145,8 +148,9 @@ namespace EnvReporter
                     ? $"ON (prob {Scheduler.Probability:P0})"
                     : "OFF";
 
+                double rawSec = ZNet.instance != null ? ZNet.instance.GetTimeSeconds() : 0;
                 args.Context.AddString("=== World State ===");
-                args.Context.AddString($"TOD         : {tod:F2}  ({todLabel})");
+                args.Context.AddString($"TOD         : {tod:F2}  ({todLabel})  [ZNet raw: {rawSec:F0}s  mod1800={rawSec % 1800:F0}]");
                 args.Context.AddString($"Current env : {curEnv}{(debugEnv.Length > 0 ? $"  [forced: {debugEnv}]" : "")}");
                 args.Context.AddString($"Next env    : {nextEnv}");
                 args.Context.AddString($"Is wet      : {EnvMan.IsWet()}");
@@ -438,6 +442,12 @@ namespace EnvReporter
                 player.Message(MessageHud.MessageType.Center, "No forsaken power to reset.");
                 return;
             }
+            float currentCooldown = cooldownField?.GetValue(player) is float cd ? cd : 0f;
+            if (currentCooldown <= 0f)
+            {
+                player.Message(MessageHud.MessageType.Center, "Your power is already ready.");
+                return;
+            }
             cooldownField?.SetValue(player, 0f);
             var se = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == powerName);
             string displayName = se?.m_name ?? powerName;
@@ -525,8 +535,7 @@ namespace EnvReporter
                 }
             }
 
-            string tradeName = bestName == "Vendor_BlackForest" ? "Haldor" : "Hildir";
-            player.Message(MessageHud.MessageType.Center, $"Gold calls to gold... {tradeName} awaits.");
+            player.Message(MessageHud.MessageType.Center, Cfg.Rituals.Items.GetValueOrDefault("seek_trader")?.Message ?? "Gold calls to gold...");
             Log.LogInfo($"[EnvR] Trader seek: {bestName} at {bestDist:F0}m");
 
             var dir = (bestPos - player.transform.position);
@@ -815,6 +824,13 @@ namespace EnvReporter
 
         internal static float GetTod()
         {
+            var em = EnvMan.instance;
+            if (em != null)
+            {
+                var dbgField = typeof(EnvMan).GetField("m_debugTimeOfDay", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                if (dbgField?.GetValue(em) is float dbg && dbg >= 0f)
+                    return dbg;
+            }
             if (ZNet.instance == null) return 0f;
             const float dayLen = 1800f;
             return (float)(ZNet.instance.GetTimeSeconds() % dayLen / dayLen);
@@ -859,8 +875,8 @@ namespace EnvReporter
             if (Plugin.WaterWalkExpiry <= 0f || Time.time >= Plugin.WaterWalkExpiry) return true;
             // Only treat as grounded when within 0.5m of water surface — prevents mid-air re-jumping
             WaterVolume? vol = null;
-            float wl = Floating.GetWaterLevel(__instance.transform.position, ref vol) + 0.15f;
-            if (__instance.transform.position.y <= wl + 0.5f)
+            float wl = Floating.GetWaterLevel(__instance.transform.position, ref vol);
+            if (__instance.transform.position.y <= wl + 0.02f)
             { __result = true; return false; }
             return true;
         }
@@ -883,6 +899,22 @@ namespace EnvReporter
         static bool Prefix()
         {
             return !(Plugin.WaterWalkExpiry > 0f && Time.time < Plugin.WaterWalkExpiry);
+        }
+    }
+
+    [HarmonyPatch(typeof(Character), "Jump")]
+    class WaterWalkJumpPatch
+    {
+        static void Postfix(Character __instance)
+        {
+            if (__instance != Player.m_localPlayer) return;
+            if (Plugin.WaterWalkExpiry <= 0f || Time.time >= Plugin.WaterWalkExpiry) return;
+            WaterVolume? vol = null;
+            float wl = Floating.GetWaterLevel(__instance.transform.position, ref vol);
+            if (__instance.transform.position.y > wl + 0.5f) return; // already airborne
+            var rf = BindingFlags.Instance | BindingFlags.NonPublic;
+            if (typeof(Character).GetField("m_body", rf)?.GetValue(__instance) is Rigidbody rb)
+                rb.AddForce(Vector3.up * 4f, ForceMode.VelocityChange);
         }
     }
 
@@ -917,6 +949,7 @@ namespace EnvReporter
             __result += row("Mead Base",   "clear_skies",   items);
             __result += row("Stone",       "water_walk",    items);
             __result += row("Ancient Seed","growth",        items);
+            __result += row("Bone Fragments","tame_flock",  items);
             __result += row("Flint",       "seek_player",   items);
             __result += row("Resin",       "kindle",        items);
             __result += "</size>";
@@ -967,7 +1000,8 @@ namespace EnvReporter
                          || (prefab == "Stone"               && RitualEnabled("water_walk"))
                          || (prefab == Plugin.GrowthFood     && RitualEnabled("growth"))
                          || (prefab == Plugin.PlayerSeekFood && RitualEnabled("seek_player"))
-                         || (prefab == Plugin.KindleFood     && RitualEnabled("kindle"));
+                         || (prefab == Plugin.KindleFood     && RitualEnabled("kindle"))
+                         || (prefab == Plugin.TameFood      && RitualEnabled("tame_flock"));
             if (!isRitual) return true;
 
             // Global cooldown check
@@ -989,6 +1023,10 @@ namespace EnvReporter
             }
             if (prefab.StartsWith("Mushroom"))
             {
+                var rf0 = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                var cdField = typeof(Player).GetField("m_guardianPowerCooldown", rf0);
+                float cd0 = cdField?.GetValue(__instance) is float v ? v : 0f;
+                if (cd0 <= 0f) { __instance.Message(MessageHud.MessageType.Center, "Your power is already ready."); return false; }
                 Consume(); Plugin.ActivateCooldownReset(__instance, RitualMsg("restore_power", "The storm answers.")); return false;
             }
             if (prefab == Plugin.HomeFood)
@@ -1031,6 +1069,14 @@ namespace EnvReporter
             {
                 Consume(); Plugin.ActivateKindle(__instance, RitualMsg("kindle", "The darkness yields.")); return false;
             }
+            if (prefab == Plugin.TameFood)
+            {
+                if (Plugin.TameBlessingActive)
+                { __instance.Message(MessageHud.MessageType.Center, "The bond already waits in your dreams."); return false; }
+                Consume(); Plugin.TameBlessingActive = true;
+                __instance.Message(MessageHud.MessageType.Center, RitualMsg("tame_flock", "The bones remember loyalty. Sleep, and your flock will answer."));
+                return false;
+            }
 
             return true;
         }
@@ -1064,6 +1110,25 @@ namespace EnvReporter
 
             if (count > 0)
                 __instance.Message(MessageHud.MessageType.TopLeft, $"{count} crops answered the blessing.");
+
+            // Tame blessing
+            if (!Plugin.TameBlessingActive) return;
+            Plugin.TameBlessingActive = false;
+            int tameCount = 0;
+            foreach (var tameable in UnityEngine.Object.FindObjectsOfType<Tameable>())
+            {
+                if (Vector3.Distance(tameable.transform.position, pos) > radius) continue;
+                var nview2 = tameable.GetComponent<ZNetView>();
+                if (nview2 == null || !nview2.IsValid() || !nview2.IsOwner()) continue;
+                float tame = nview2.GetZDO().GetFloat(ZDOVars.s_tameTimeLeft, -1f);
+                // Only tame creatures already started (tameTimeLeft has been set = tameness > 0)
+                if (tame < 0f) continue;
+                var ch = tameable.GetComponent<Character>();
+                if (ch != null) ch.SetTamed(true);
+                tameCount++;
+            }
+            if (tameCount > 0)
+                __instance.Message(MessageHud.MessageType.TopLeft, $"{tameCount} creatures answered the bond.");
         }
     }
 
@@ -1323,33 +1388,33 @@ namespace EnvReporter
 
     // ── Cart: drop upgrade materials on destruction ──────────────────────────
 
-    [HarmonyPatch(typeof(WearNTear), "OnDestroyed")]
+    [HarmonyPatch(typeof(WearNTear), "Awake")]
     class VagonDestroyPatch
     {
-        static void Prefix(WearNTear __instance)
+        static void Postfix(WearNTear __instance)
         {
             if (!Plugin.Cfg.Carts.Enabled) return;
-            var vagon = __instance.GetComponent<Vagon>();
-            if (vagon == null) return;
-            var nview = __instance.GetComponent<ZNetView>();
-            if (nview == null || !nview.IsValid() || !nview.IsOwner()) return;
-            int level = nview.GetZDO()?.GetInt("ath_cart_level") ?? 0;
-            if (level <= 0) return;
-
-            var scene = ZNetScene.instance;
-            if (scene == null) return;
-            var pos = __instance.transform.position;
-
-            for (int i = 0; i < level; i++)
+            if (__instance.GetComponent<Vagon>() == null) return;
+            __instance.m_onDestroyed += () =>
             {
-                foreach (var (itemName, amount) in CartUpgrade.Costs[i])
+                var nview = __instance.GetComponent<ZNetView>();
+                if (nview == null || !nview.IsValid() || !nview.IsOwner()) return;
+                int level = nview.GetZDO()?.GetInt("ath_cart_level") ?? 0;
+                if (level <= 0) return;
+                var scene = ZNetScene.instance;
+                if (scene == null) return;
+                var pos = __instance.transform.position;
+                for (int i = 0; i < level && i < CartUpgrade.Costs.Length; i++)
                 {
-                    var prefab = scene.GetPrefab(itemName);
-                    if (prefab == null) continue;
-                    for (int n = 0; n < amount; n++)
-                        UnityEngine.Object.Instantiate(prefab, pos + UnityEngine.Random.insideUnitSphere * 0.5f, UnityEngine.Quaternion.identity);
+                    foreach (var (itemName, amount) in CartUpgrade.Costs[i])
+                    {
+                        var prefab = scene.GetPrefab(itemName);
+                        if (prefab == null) continue;
+                        for (int n = 0; n < amount; n++)
+                            UnityEngine.Object.Instantiate(prefab, pos + UnityEngine.Random.insideUnitSphere * 0.5f, UnityEngine.Quaternion.identity);
+                    }
                 }
-            }
+            };
         }
     }
 
@@ -1497,7 +1562,6 @@ namespace EnvReporter
         public List<string> NoonPool  = new List<string> { "GoldenAscent", "PilgrimDawn", "TropicalHaze" };
 
         bool    _lastNight;
-        bool    _lastWaterWalkActive;
         bool    _noonRolled;
         string? _setByUs;
         long    _lastNightPeriod = -1;
@@ -1590,24 +1654,6 @@ namespace EnvReporter
                     Plugin.HomeEnvExpiry = 0f;
             }
 
-            // Water walk: ignore collision with water volumes — only refresh when state changes, not every frame
-            bool wwNowActive = Plugin.WaterWalkExpiry > 0f && Time.time < Plugin.WaterWalkExpiry;
-            if (wwNowActive != _lastWaterWalkActive)
-            {
-                _lastWaterWalkActive = wwNowActive;
-                var wwPlayer = Player.m_localPlayer;
-                var playerCol = wwPlayer?.GetComponent<Collider>();
-                if (playerCol != null)
-                {
-                    foreach (var wv in UnityEngine.Object.FindObjectsOfType<WaterVolume>())
-                    {
-                        if (wv == null) continue;
-                        var wvCol = wv.GetComponent<Collider>();
-                        if (wvCol != null)
-                            Physics.IgnoreCollision(playerCol, wvCol, wwNowActive);
-                    }
-                }
-            }
 
             if (Plugin.WaterWalkExpiry > 0f)
             {
@@ -1634,19 +1680,20 @@ namespace EnvReporter
                         if (bodyField?.GetValue(wp) is Rigidbody rb)
                         {
                             WaterVolume? vol = null;
-                            float wl = Floating.GetWaterLevel(wp.transform.position, ref vol) + 0.15f;
+                            float wl = Floating.GetWaterLevel(wp.transform.position, ref vol);
                             float diff = wl - wp.transform.position.y;
-                            if (diff > 0.05f)
-                            {
-                                // Below target — lift
+                            bool nearSurface = diff > -0.02f;
+                            if (diff > 0.05f && rb.velocity.y <= 0f)
                                 rb.velocity = new Vector3(rb.velocity.x, Mathf.Min(diff * 10f, 5f), rb.velocity.z);
-                            }
-                            else if (diff > -0.4f && rb.velocity.y < 0f)
-                            {
-                                // At target — cancel downward velocity
+                            else if (nearSurface && rb.velocity.y < 0f)
                                 rb.velocity = new Vector3(rb.velocity.x, 0f, rb.velocity.z);
+
+                            // Tell the character controller it's on solid ground near the surface
+                            if (nearSurface && rb.velocity.y <= 0f)
+                            {
+                                typeof(Character).GetField("m_groundContact",       rf2)?.SetValue(wp, true);
+                                typeof(Character).GetField("m_groundContactNormal", rf2)?.SetValue(wp, Vector3.up);
                             }
-                            // Higher up after a jump — gravity acts normally
                         }
                     }
                 }
@@ -1688,15 +1735,25 @@ namespace EnvReporter
             var dir = direction.normalized;
             var player = Player.m_localPlayer;
 
-            // Redirect any existing world birds within 60m
+            // Redirect any existing world birds within 60m — delayed so they depart as the V-formation arrives
             if (player != null)
             {
                 foreach (var mb in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>())
                 {
                     if (mb == null || mb.GetType().Name != "RandomFlyingBird") continue;
                     if (Vector3.Distance(mb.transform.position, player.transform.position) > 60f) continue;
-                    StartCoroutine(RedirectWorldBird(mb.gameObject, dir, speed));
+                    StartCoroutine(DelayedRedirect(mb.gameObject, dir, speed, 5f));
                 }
+            }
+
+            // Crow sounds at ritual start
+            var scene2 = ZNetScene.instance;
+            if (scene2 != null && player != null)
+            {
+                var sfx = scene2.GetPrefab("sfx_crow_death");
+                if (sfx != null)
+                    for (int s = 0; s < 3; s++)
+                        UnityEngine.Object.Instantiate(sfx, player.transform.position + UnityEngine.Random.insideUnitSphere * 3f, Quaternion.identity);
             }
 
             // Spawn V-formation — 3s base delay so player has time to look up
@@ -1704,16 +1761,34 @@ namespace EnvReporter
             var right = Vector3.Cross(Vector3.up, dir).normalized;
             Vector3[] offsets = {
                 Vector3.zero,
-                -right * 3f  + dir * -4f,
-                 right * 3f  + dir * -4f,
-                -right * 6f  + dir * -8f,
-                 right * 6f  + dir * -8f,
-                -right * 9f  + dir * -12f,
-                 right * 9f  + dir * -12f,
+                -right *  3f + dir *  -4f,
+                 right *  3f + dir *  -4f,
+                -right *  6f + dir *  -8f,
+                 right *  6f + dir *  -8f,
+                -right *  9f + dir * -12f,
+                 right *  9f + dir * -12f,
                 -right * 12f + dir * -16f,
+                 right * 12f + dir * -16f,
+                -right *  2f + dir *  -6f,
+                 right *  2f + dir *  -6f,
+                -right *  5f + dir * -10f,
+                 right *  5f + dir * -10f,
+                -right *  8f + dir * -14f,
+                 right *  8f + dir * -14f,
+                -right * 11f + dir * -18f,
+                 right * 11f + dir * -18f,
+                -right * 14f + dir * -20f,
+                 right * 14f + dir * -20f,
+                 Vector3.up  *  4f + dir *  -2f,
             };
             for (int i = 0; i < offsets.Length; i++)
-                StartCoroutine(SingleBird(dir, speed, offsets[i], baseDelay + i * 0.3f));
+                StartCoroutine(SingleBird(dir, speed, offsets[i], baseDelay + i * 0.25f));
+        }
+
+        IEnumerator DelayedRedirect(GameObject bird, Vector3 dir, float speed, float delay)
+        {
+            yield return new WaitForSeconds(delay);
+            if (bird != null) StartCoroutine(RedirectWorldBird(bird, dir, speed));
         }
 
         IEnumerator RedirectWorldBird(GameObject bird, Vector3 dir, float speed)
@@ -1724,6 +1799,12 @@ namespace EnvReporter
                 if (mb != null && mb.GetType().Name == "RandomFlyingBird") mb.enabled = false;
             foreach (var ai in bird.GetComponentsInChildren<BaseAI>(true))
                 ai.enabled = false;
+            // Force flying animation
+            foreach (var comp in bird.GetComponentsInChildren<UnityEngine.Component>())
+            {
+                var setbool = comp?.GetType().GetMethod("SetBool", new[] { typeof(string), typeof(bool) });
+                if (setbool != null) { setbool.Invoke(comp, new object[] { "flapping", true }); break; }
+            }
 
             float elapsed = 0f;
             float wobbleOffset = UnityEngine.Random.Range(0f, Mathf.PI * 2f);
@@ -1874,13 +1955,14 @@ namespace EnvReporter
                     ["restore_power"] = new RitualItemConfig { Enabled = true, Item = "Mushroom*",  HoverText = "Restore your power",         Message = "The flame accepts your offering. {power} is ready.", Duration = 600f },
                     ["seek_bed"]      = new RitualItemConfig { Enabled = true, Item = "Dandelion",  HoverText = "Seek your bed",              Message = "The flower carries you home..." },
                     ["feather_fall"]  = new RitualItemConfig { Enabled = true, Item = "Feathers",   HoverText = "Fall without fear",          Message = "Light as a feather — fall without fear." },
-                    ["seek_trader"]   = new RitualItemConfig { Enabled = true, Item = "Coins",      HoverText = "Seek a merchant",            Message = "Gold calls to gold... {trader} awaits." },
+                    ["seek_trader"]   = new RitualItemConfig { Enabled = true, Item = "Coins",      HoverText = "Seek a merchant",            Message = "Gold calls to gold..." },
                     ["seek_dungeon"]  = new RitualItemConfig { Enabled = true, Item = "Trophy*",    HoverText = "Seek the nearest dungeon",   Message = "The veil parts — something stirs nearby." },
                     ["clear_skies"]   = new RitualItemConfig { Enabled = true, Item = "MeadBase*",  HoverText = "Clear the skies",            Message = "The clouds part.", Duration = 900f },
                     ["water_walk"]    = new RitualItemConfig { Enabled = true, Item = "Stone",      HoverText = "Walk on water",              Message = "The sea grows still beneath your feet.", Duration = 60f },
                     ["growth"]        = new RitualItemConfig { Enabled = true, Item = "AncientSeed",HoverText = "Bless your crops",           Message = "The seed remembers the earth. Sleep, and your crops will answer." },
                     ["seek_player"]   = new RitualItemConfig { Enabled = true, Item = "Flint",      HoverText = "Seek a fellow pilgrim",      Message = "Find fellowship." },
                     ["kindle"]        = new RitualItemConfig { Enabled = true, Item = "Resin",      HoverText = "Kindle nearby fires",        Message = "The darkness yields." },
+                    ["tame_flock"]    = new RitualItemConfig { Enabled = true, Item = "BoneFragments", HoverText = "Tame the flock",          Message = "The bones remember loyalty. Sleep, and your flock will answer." },
                 },
             },
         };
