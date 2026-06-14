@@ -1,0 +1,11 @@
+# Build output
+Pilgrim/bin/
+Pilgrim/obj/
+
+# User-specific VS files
+*.user
+.vs/
+
+# OS
+Thumbs.db
+.DS_Store
