@@ -1,0 +1,34 @@
+[config]
+schemaVersion = "0.0.1"
+
+[package]
+namespace = "ctogle"
+name = "Pilgrim"
+versionNumber = "0.1.0"
+description = "Ritual-based progression for Valheim. Offer items at campfires to unlock powers, seek waypoints, and survive the pilgrimage."
+websiteUrl = "https://github.com/ctogle/ValheimPilgrim"
+containsNsfwContent = false
+
+[package.dependencies]
+denikson-BepInExPack_Valheim = "5.4.2202"
+ValheimModding-YamlDotNet = "13.1.1"
+
+[build]
+icon = "./Pilgrim/icon.png"
+readme = "./README_thunderstore.md"
+outdir = "./dist"
+
+[[build.copy]]
+source = "./Pilgrim/bin/Release/netstandard2.1/Pilgrim.dll"
+target = "plugins/Pilgrim.dll"
+
+[[build.copy]]
+source = "./CHANGELOG.md"
+target = "CHANGELOG.md"
+
+[publish]
+repository = "https://thunderstore.io"
+communities = ["valheim"]
+
+[publish.categories]
+valheim = ["mods"]
