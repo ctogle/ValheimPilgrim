@@ -11,13 +11,14 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.curtis.envreporter", "Pilgrim", "1.0.0")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "1.0.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static BepInEx.Logging.ManualLogSource Log = null!;
         internal static EnvScheduler?  Scheduler;
         internal static SE_GuidingWind? GuidingWindSE;
         internal static SE_WaterWalk?   WaterWalkSE;
+        internal static SE_Giant?       GiantSE;
 
         // ── Config ──────────────────────────────────────────────────────────
         internal static PilgrimConfig Cfg = PilgrimConfig.Default();
@@ -63,11 +64,45 @@ namespace EnvReporter
         internal static string PlayerSeekFood => Cfg.Rituals.Items.GetValueOrDefault("seek_player")?.Item  ?? "Flint";
         internal static string KindleFood    => Cfg.Rituals.Items.GetValueOrDefault("kindle")?.Item        ?? "Resin";
         internal static string TameFood     => Cfg.Rituals.Items.GetValueOrDefault("tame_flock")?.Item    ?? "BoneFragments";
-        // Wildcards: Trophy* → dungeon seek, MeadBase*/GreydwarfEye → clear skies, Mushroom* → restore power
+        internal static string GiantFood    => Cfg.Rituals.Items.GetValueOrDefault("giant")?.Item         ?? "YmirRemains";
+        // Wildcards: Trophy* → dungeon seek, Mushroom* → restore power
         // (prefix matching stays hardcoded; hover text and messages come from config)
 
         // Seek target override — when set, SE_GuidingWind tracks this position instead of next boss altar
         internal static Vector3? SeekOverrideTarget = null;
+
+        // ── Ritual discovery ────────────────────────────────────────────────────
+        internal static bool IsRitualKnown(Player player, string key) =>
+            player.m_customData.ContainsKey($"ath_known_{key}");
+
+        internal static void LearnRitual(Player player, string key, string itemDisplayName)
+        {
+            if (IsRitualKnown(player, key)) return;
+            player.m_customData[$"ath_known_{key}"] = "1";
+            if (!Cfg.Rituals.Items.TryGetValue(key, out var r)) return;
+            player.Message(MessageHud.MessageType.TopLeft,
+                $"<color=orange>Ritual discovered:</color> {r.HoverText}");
+            player.Message(MessageHud.MessageType.Center,
+                $"<color=orange>Ritual discovered</color>\n{r.HoverText}\nOffer <color=yellow>{itemDisplayName}</color> at a burning campfire.");
+        }
+
+        // (prefab, isPrefix, ritualKey, displayName) — order matters for wildcard checks
+        internal static readonly (string Match, bool Prefix, string Key, string Display)[] RitualItemMap =
+        {
+            ("RawMeat",       false, "seek_altar",    "Boar Meat"),
+            ("Mushroom",      true,  "restore_power", "Mushroom"),
+            ("Dandelion",     false, "seek_bed",      "Dandelion"),
+            ("Feathers",      false, "feather_fall",  "Feathers"),
+            ("Coins",         false, "seek_trader",   "Coins"),
+            ("Trophy",        true,  "seek_dungeon",  "a Trophy"),
+            ("GreydwarfEye",  false, "clear_skies",   "Greydwarf Eye"),
+            ("Stone",         false, "water_walk",    "Stone"),
+            ("AncientSeed",   false, "growth",        "Ancient Seed"),
+            ("BoneFragments", false, "tame_flock",    "Bone Fragments"),
+            ("Flint",         false, "seek_player",   "Flint"),
+            ("Resin",         false, "kindle",        "Resin"),
+            ("YmirRemains",   false, "giant",         "Ymir Flesh"),
+        };
 
         // Global ritual cooldown
         internal static float RitualCooldownRemaining = 0f;
@@ -91,6 +126,19 @@ namespace EnvReporter
         internal static float HomeEnvExpiry        = 0f;
         internal static bool  GrowthBlessingActive = false;
         internal static bool  TameBlessingActive   = false;
+        internal static float GiantExpiry          = 0f;
+        internal static float GiantTargetScale     = 1f;
+        internal const  float GiantCarryBonus      = 300f;
+        internal const  float GiantScale           = 3f;
+        internal const  float GiantWalkMult        = 1.5f;
+        internal const  float GiantRunMult         = 2.5f;
+        internal const  float GiantJumpMult        = 1.2f;
+        internal static bool  GiantSpeedApplied    = false;
+        static HitData.DamageTypes _origUnarmedDmg;
+        static short               _origUnarmedTier;
+        static float               _origAttackRange;
+        static float               _origAttackHeight;
+        static float               _origAttackOffset;
 
         // Boss trophy → guardian power
         internal static readonly Dictionary<string, string> TrophyToPower = new Dictionary<string, string>
@@ -117,7 +165,7 @@ namespace EnvReporter
                 EnableRaisingEvents = true,
             };
             _cfgWatcher.Changed += (_, __) => _cfgDirty = true;
-            try { new Harmony("com.curtis.envreporter").PatchAll(); }
+            try { new Harmony("com.ctogle.pilgrim").PatchAll(); }
             catch (System.Exception ex) { Log.LogError($"[Pilgrim] Harmony patch failed: {ex.Message}"); }
             RegisterCommands();
             var go = new GameObject("AthScheduler");
@@ -228,6 +276,7 @@ namespace EnvReporter
                 SeekEnvExpiry    = 0f;
                 DungeonEnvExpiry = 0f;
                 HomeEnvExpiry    = 0f;
+                if (GiantExpiry > 0f) { var gp = Player.m_localPlayer; if (gp != null) DeactivateGiant(gp); else GiantExpiry = 0f; }
                 if (EnvMan.instance != null) EnvMan.instance.m_debugEnv = "";
                 EnvMan.instance?.ResetDebugWind();
                 args.Context.AddString("Weather overrides cleared.");
@@ -304,6 +353,35 @@ namespace EnvReporter
                 args.Context.AddString($"Global cooldown: {RitualCooldownDuration}s. Hold item in slot 1, look at burning campfire, press 1.");
             });
 
+            // ── ath_learn / ath_forget ──────────────────────────────────────
+            new Terminal.ConsoleCommand("ath_learn",
+                "ath_learn [ritual|all] — unlock ritual discovery (for testing)", args =>
+            {
+                var player = Player.m_localPlayer;
+                if (player == null) return;
+                string target = args.Args.Length > 1 ? args.Args[1].ToLower() : "all";
+                foreach (var (_, _, key, display) in Plugin.RitualItemMap)
+                {
+                    if (target != "all" && key != target) continue;
+                    LearnRitual(player, key, display);
+                }
+                args.Context.AddString(target == "all" ? "All rituals learned." : $"Learned: {target}");
+            });
+
+            new Terminal.ConsoleCommand("ath_forget",
+                "ath_forget [ritual|all] — reset ritual discovery", args =>
+            {
+                var player = Player.m_localPlayer;
+                if (player == null) return;
+                string target = args.Args.Length > 1 ? args.Args[1].ToLower() : "all";
+                foreach (var (_, _, key, _) in Plugin.RitualItemMap)
+                {
+                    if (target != "all" && key != target) continue;
+                    player.m_customData.Remove($"ath_known_{key}");
+                }
+                args.Context.AddString(target == "all" ? "All rituals forgotten." : $"Forgotten: {target}");
+            });
+
             // ── ath_vfx ─────────────────────────────────────────────────────
             new Terminal.ConsoleCommand("ath_vfx",
                 "ath_vfx <prefabName|list> — preview a VFX at your position, or list all vfx_ prefabs", args =>
@@ -355,6 +433,40 @@ namespace EnvReporter
                 foreach (var e in em.m_environments) args.Context.AddString($"  {e.m_name}");
             });
 
+            new Terminal.ConsoleCommand("ath_birdparams", "dump RandomFlyingBird fields and animator params on nearby birds", args =>
+            {
+                var player = Player.m_localPlayer;
+                if (player == null) return;
+                int found = 0;
+                foreach (var mb in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>())
+                {
+                    if (mb == null || mb.GetType().Name != "RandomFlyingBird") continue;
+                    if (Vector3.Distance(mb.transform.position, player.transform.position) > 60f) continue;
+                    found++;
+                    args.Context.AddString($"--- Bird {found} ({mb.gameObject.name}) ---");
+                    var rf = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
+                    foreach (var f in mb.GetType().GetFields(rf))
+                    {
+                        try { args.Context.AddString($"  {f.FieldType.Name} {f.Name} = {f.GetValue(mb)}"); }
+                        catch { }
+                    }
+                    foreach (var comp in mb.GetComponentsInChildren<UnityEngine.Component>())
+                    {
+                        var getParams = comp?.GetType().GetProperty("parameters");
+                        if (getParams == null) continue;
+                        var ps = getParams.GetValue(comp) as System.Array;
+                        if (ps == null) continue;
+                        foreach (var p in ps)
+                        {
+                            var nameProp = p.GetType().GetProperty("name");
+                            var typeProp = p.GetType().GetProperty("type");
+                            args.Context.AddString($"  Anim param: {nameProp?.GetValue(p)} ({typeProp?.GetValue(p)})");
+                        }
+                    }
+                }
+                if (found == 0) args.Context.AddString("No birds within 60m.");
+            });
+
             new Terminal.ConsoleCommand("ath_envdump", "dumps env-related EnvMan fields", args =>
             {
                 var em = EnvMan.instance;
@@ -362,7 +474,7 @@ namespace EnvReporter
                 foreach (var f in typeof(EnvMan).GetFields(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
                 {
                     string n = f.Name;
-                    if (!n.ToLower().Contains("env") && !n.ToLower().Contains("current")) continue;
+                    if (!n.ToLower().Contains("env") && !n.ToLower().Contains("current") && !n.ToLower().Contains("debug") && !n.ToLower().Contains("time")) continue;
                     var val = f.GetValue(em);
                     string display = val == null ? "null" : val.ToString()!;
                     if (val is EnvSetup es) display = $"EnvSetup({es.m_name})";
@@ -675,6 +787,79 @@ namespace EnvReporter
             player.Message(MessageHud.MessageType.Center, message);
         }
 
+        // ── Giant ritual ────────────────────────────────────────────────────
+
+        internal static void ActivateGiant(Player player, string message = "The mountain answers. You are vast.")
+        {
+            float duration = Cfg.Rituals.Items.GetValueOrDefault("giant")?.Duration ?? 180f;
+            GiantExpiry = Time.time + duration;
+            GiantTargetScale = GiantScale;
+            player.GetComponent<ZNetView>()?.GetZDO()?.Set("ath_scale", GiantScale);
+            player.m_maxCarryWeight += GiantCarryBonus;
+            var se = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == "SE_Giant") ?? GiantSE;
+            if (se != null) { se.m_ttl = duration; player.GetSEMan().AddStatusEffect(se, true); }
+            ApplyGiantSpeed(player);
+            var unarmed = player.m_unarmedWeapon?.m_itemData?.m_shared;
+            if (unarmed != null)
+            {
+                _origUnarmedDmg    = unarmed.m_damages;
+                _origUnarmedTier   = (short)unarmed.m_toolTier;
+                _origAttackRange   = unarmed.m_attack.m_attackRange;
+                _origAttackHeight  = unarmed.m_attack.m_attackHeight;
+                _origAttackOffset  = unarmed.m_attack.m_attackOffset;
+                unarmed.m_damages.m_blunt   = 200f;
+                unarmed.m_damages.m_chop    = 200f;
+                unarmed.m_damages.m_pickaxe = 200f;
+                unarmed.m_toolTier          = (short)100;
+                unarmed.m_attack.m_attackRange  = _origAttackRange  * GiantScale;
+                unarmed.m_attack.m_attackHeight = _origAttackHeight * GiantScale;
+                unarmed.m_attack.m_attackOffset = _origAttackOffset * GiantScale;
+            }
+            if (EnvMan.instance != null) EnvMan.instance.m_debugEnv = "GoldenAscent";
+            player.Message(MessageHud.MessageType.Center, message);
+        }
+
+        internal static void ApplyGiantSpeed(Player player)
+        {
+            if (GiantSpeedApplied) return;
+            player.m_walkSpeed  *= GiantWalkMult;
+            player.m_runSpeed   *= GiantRunMult;
+            player.m_swimSpeed  *= GiantWalkMult;
+            player.m_jumpForce  *= GiantJumpMult;
+            GiantSpeedApplied = true;
+        }
+
+        internal static void RemoveGiantSpeed(Player player)
+        {
+            if (!GiantSpeedApplied) return;
+            player.m_walkSpeed  /= GiantWalkMult;
+            player.m_runSpeed   /= GiantRunMult;
+            player.m_swimSpeed  /= GiantWalkMult;
+            player.m_jumpForce  /= GiantJumpMult;
+            GiantSpeedApplied = false;
+        }
+
+        internal static void DeactivateGiant(Player player)
+        {
+            GiantExpiry = 0f;
+            GiantTargetScale = 1f;
+            player.GetComponent<ZNetView>()?.GetZDO()?.Set("ath_scale", 1f);
+            RemoveGiantSpeed(player);
+            var unarmedShared = player.m_unarmedWeapon?.m_itemData?.m_shared;
+            if (unarmedShared != null)
+            {
+                unarmedShared.m_damages  = _origUnarmedDmg;
+                unarmedShared.m_toolTier = _origUnarmedTier;
+                unarmedShared.m_attack.m_attackRange  = _origAttackRange;
+                unarmedShared.m_attack.m_attackHeight = _origAttackHeight;
+                unarmedShared.m_attack.m_attackOffset = _origAttackOffset;
+            }
+            player.m_maxCarryWeight = Mathf.Max(player.m_maxCarryWeight - GiantCarryBonus, 300f);
+            player.GetSEMan().RemoveStatusEffect(GiantSE?.NameHash() ?? 0);
+            if (EnvMan.instance?.m_debugEnv == "GoldenAscent") EnvMan.instance.m_debugEnv = "";
+            player.Message(MessageHud.MessageType.TopLeft, "You return to mortal scale.");
+        }
+
         // ── Trophy shrine logic ─────────────────────────────────────────────
 
         internal static void GrantTrophyPower(Player player, string trophyPrefab, Terminal? ctx = null, UnityEngine.Vector3? vfxPos = null)
@@ -716,6 +901,11 @@ namespace EnvReporter
             var novaPrefab = scene.GetPrefab("fx_fireskeleton_nova");
             if (novaPrefab != null)
                 UnityEngine.Object.Instantiate(novaPrefab, firePos, Quaternion.identity);
+
+            // Lightning strike from the gods — on the campfire (disabled for now, revisit)
+            // var lightningPrefab = scene.GetPrefab("fx_chainlightning_hit");
+            // if (lightningPrefab != null)
+            //     UnityEngine.Object.Instantiate(lightningPrefab, firePos, Quaternion.identity);
         }
 
         static void SpawnTrophyVFX(UnityEngine.Vector3 pos)
@@ -827,9 +1017,12 @@ namespace EnvReporter
             var em = EnvMan.instance;
             if (em != null)
             {
-                var dbgField = typeof(EnvMan).GetField("m_debugTimeOfDay", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                if (dbgField?.GetValue(em) is float dbg && dbg >= 0f)
-                    return dbg;
+                var rf = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
+                // Newer Valheim: m_debugTimeOfDay=bool, m_debugTime=float
+                var enableField = typeof(EnvMan).GetField("m_debugTimeOfDay", rf);
+                var timeField   = typeof(EnvMan).GetField("m_debugTime",      rf);
+                if (enableField?.GetValue(em) is bool enabled && enabled && timeField?.GetValue(em) is float t)
+                    return t;
             }
             if (ZNet.instance == null) return 0f;
             const float dayLen = 1800f;
@@ -932,26 +1125,58 @@ namespace EnvReporter
             if (!System.Array.Exists(CampfirePrefabs, p => goName.StartsWith(p))) return;
 
             if (!Plugin.Cfg.Rituals.Enabled) return;
+            var player = Player.m_localPlayer;
+
+            var items = Plugin.Cfg.Rituals.Items;
+            bool KnownAndEnabled(string key) =>
+                items.TryGetValue(key, out var r) && r.Enabled &&
+                (player == null || Plugin.IsRitualKnown(player, key));
+
+            // Deduplicate keys so clear_skies (two items) only shows once
+            var seen = new System.Collections.Generic.HashSet<string>();
+            var rows = new System.Text.StringBuilder();
+            foreach (var (_, _, key, _) in Plugin.RitualItemMap)
+            {
+                if (!seen.Add(key)) continue;
+                if (!KnownAndEnabled(key)) continue;
+                if (!items.TryGetValue(key, out var r)) continue;
+                // Map key → friendly item name shown in hover
+                string itemLabel = key switch {
+                    "seek_altar"    => "Boar Meat",
+                    "restore_power" => "Mushroom",
+                    "seek_bed"      => "Dandelion",
+                    "feather_fall"  => "Feathers",
+                    "seek_trader"   => "Coins",
+                    "seek_dungeon"  => "Trophy",
+                    "clear_skies"   => "Greydwarf Eye",
+                    "water_walk"    => "Stone",
+                    "growth"        => "Ancient Seed",
+                    "tame_flock"    => "Bone Fragments",
+                    "seek_player"   => "Flint",
+                    "kindle"        => "Resin",
+                    "giant"         => "Ymir Flesh",
+                    _               => key,
+                };
+                rows.Append($"\n  <color=yellow>{itemLabel}</color> — {r.HoverText}");
+            }
+
+            // Count totals (deduplicated by key)
+            var allKeys = new System.Collections.Generic.HashSet<string>();
+            var knownKeys = new System.Collections.Generic.HashSet<string>();
+            foreach (var (_, _, k, _) in Plugin.RitualItemMap)
+            {
+                if (!items.TryGetValue(k, out var rc) || !rc.Enabled) continue;
+                allKeys.Add(k);
+                if (player != null && Plugin.IsRitualKnown(player, k)) knownKeys.Add(k);
+            }
+
+            if (rows.Length == 0) return; // no known rituals — fire is just a fire
+
             string cdStr = Plugin.RitualCooldownRemaining > 0f
                 ? $" <color=red>({Plugin.RitualCooldownRemaining:F0}s)</color>" : "";
-            __result += $"\n<size=14><color=orange>── Offerings{cdStr} ──</color>";
-            var items = Plugin.Cfg.Rituals.Items;
-            static string row(string displayName, string key, Dictionary<string, RitualItemConfig> d) =>
-                d.TryGetValue(key, out var r) && r.Enabled
-                    ? $"\n  <color=yellow>{displayName}</color> — {r.HoverText}"
-                    : "";
-            __result += row("Boar Meat",   "seek_altar",    items);
-            __result += row("Mushroom",    "restore_power", items);
-            __result += row("Dandelion",   "seek_bed",      items);
-            __result += row("Feathers",    "feather_fall",  items);
-            __result += row("Coins",       "seek_trader",   items);
-            __result += row("Trophy",      "seek_dungeon",  items);
-            __result += row("Mead Base",   "clear_skies",   items);
-            __result += row("Stone",       "water_walk",    items);
-            __result += row("Ancient Seed","growth",        items);
-            __result += row("Bone Fragments","tame_flock",  items);
-            __result += row("Flint",       "seek_player",   items);
-            __result += row("Resin",       "kindle",        items);
+            string countStr = $" <color={(knownKeys.Count < allKeys.Count ? "yellow" : "green")}>{knownKeys.Count}/{allKeys.Count}</color>";
+            __result += $"\n<size=14><color=orange>── Offerings{countStr}{cdStr} ──</color>";
+            __result += rows.ToString();
             __result += "</size>";
         }
     }
@@ -985,7 +1210,8 @@ namespace EnvReporter
             string prefab = item.m_dropPrefab.name;
             var ritualItems = Plugin.Cfg.Rituals.Items;
             bool RitualEnabled(string key) =>
-                ritualItems.TryGetValue(key, out var r) && r.Enabled;
+                ritualItems.TryGetValue(key, out var r) && r.Enabled &&
+                Plugin.IsRitualKnown(__instance, key);
             string RitualMsg(string key, string fallback) =>
                 ritualItems.TryGetValue(key, out var r) ? r.Message : fallback;
 
@@ -995,13 +1221,13 @@ namespace EnvReporter
                          || (prefab == Plugin.FeatherFood    && RitualEnabled("feather_fall"))
                          || (prefab == Plugin.TraderFood     && RitualEnabled("seek_trader"))
                          || (prefab.StartsWith("Trophy")    && RitualEnabled("seek_dungeon"))
-                         || (prefab.StartsWith("MeadBase")  && RitualEnabled("clear_skies"))
                          || (prefab == "GreydwarfEye"        && RitualEnabled("clear_skies"))
                          || (prefab == "Stone"               && RitualEnabled("water_walk"))
                          || (prefab == Plugin.GrowthFood     && RitualEnabled("growth"))
                          || (prefab == Plugin.PlayerSeekFood && RitualEnabled("seek_player"))
                          || (prefab == Plugin.KindleFood     && RitualEnabled("kindle"))
-                         || (prefab == Plugin.TameFood      && RitualEnabled("tame_flock"));
+                         || (prefab == Plugin.TameFood       && RitualEnabled("tame_flock"))
+                         || (prefab == Plugin.GiantFood       && RitualEnabled("giant"));
             if (!isRitual) return true;
 
             // Global cooldown check
@@ -1045,7 +1271,7 @@ namespace EnvReporter
             {
                 Consume(); Plugin.ActivateDungeonSeek(__instance, prefab, RitualMsg("seek_dungeon", "The veil parts — something stirs nearby.")); return false;
             }
-            if (prefab.StartsWith("MeadBase") || prefab == "GreydwarfEye")
+            if (prefab == "GreydwarfEye")
             {
                 Consume(); Plugin.ActivateClearSkies(__instance, RitualMsg("clear_skies", "The clouds part.")); return false;
             }
@@ -1075,6 +1301,25 @@ namespace EnvReporter
                 { __instance.Message(MessageHud.MessageType.Center, "The bond already waits in your dreams."); return false; }
                 Consume(); Plugin.TameBlessingActive = true;
                 __instance.Message(MessageHud.MessageType.Center, RitualMsg("tame_flock", "The bones remember loyalty. Sleep, and your flock will answer."));
+                return false;
+            }
+            if (prefab == Plugin.GiantFood)
+            {
+                Plugin.Log.LogInfo($"[Pilgrim] YmirRemains at campfire: RitualEnabled={RitualEnabled("giant")} known={Plugin.IsRitualKnown(__instance, "giant")} hasKey={ritualItems.ContainsKey("giant")}");
+                if (RitualEnabled("giant"))
+                { Consume(); Plugin.ActivateGiant(__instance, RitualMsg("giant", "The mountain answers. You are vast.")); return false; }
+            }
+
+            // Catch-all: suppress vanilla for any ritual item so we never see game rejection messages
+            foreach (var (match, isPrefix, key, _) in Plugin.RitualItemMap)
+            {
+                bool matches = isPrefix ? prefab.StartsWith(match) : prefab == match;
+                if (!matches) continue;
+                // Known but config missing "giant" entry — execute if we can, else hint
+                if (ritualItems.TryGetValue(key, out var r) && r.Enabled && Plugin.IsRitualKnown(__instance, key))
+                    Plugin.Log.LogWarning($"[Pilgrim] Ritual '{key}' matched but not handled above — check UseHotbarItemPatch");
+                else
+                    __instance.Message(MessageHud.MessageType.Center, "You sense a ritual here, but don't yet understand this offering.");
                 return false;
             }
 
@@ -1277,11 +1522,21 @@ namespace EnvReporter
             ww.name           = "SE_WaterWalk";
             ww.m_name         = "Still Waters";
             ww.m_tooltip      = "The sea is glass beneath your feet.";
-            ww.m_ttl          = 0f; // timer managed by WaterWalkExpiry, not SE TTL
+            ww.m_ttl          = 0f;
             ww.m_startMessage = "";
             ww.m_stopMessage  = "";
             __instance.m_StatusEffects.Add(ww);
             Plugin.WaterWalkSE = ww;
+
+            var giant = ScriptableObject.CreateInstance<SE_Giant>();
+            giant.name           = "SE_Giant";
+            giant.m_name         = "Ymir's Fury";
+            giant.m_tooltip      = "You walk as a mountain. Carry more, strike fear.";
+            giant.m_ttl          = 180f;
+            giant.m_startMessage = "";
+            giant.m_stopMessage  = "";
+            __instance.m_StatusEffects.Add(giant);
+            Plugin.GiantSE = giant;
         }
     }
 
@@ -1300,6 +1555,52 @@ namespace EnvReporter
             int mins = (int)(remaining / 60);
             int secs = (int)(remaining % 60);
             return mins > 0 ? $"{mins}m {secs:D2}s" : $"{secs}s";
+        }
+    }
+
+    public class SE_Giant : StatusEffect
+    {
+        public override void Setup(Character character)
+        {
+            base.Setup(character);
+            // Try several icon candidates — something powerful/rage themed
+            string[] candidates = { "GP_Yagluth", "GP_Bonemass", "GP_Eikthyr", "SE_Burning", "Rested" };
+            foreach (var c in candidates)
+            {
+                var src = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == c);
+                if (src?.m_icon != null) { m_icon = src.m_icon; break; }
+            }
+        }
+
+        public override string GetIconText()
+        {
+            float remaining = Mathf.Max(0f, Plugin.GiantExpiry - Time.time);
+            int mins = (int)(remaining / 60);
+            int secs = (int)(remaining % 60);
+            return mins > 0 ? $"{mins}m {secs:D2}s" : $"{secs}s";
+        }
+    }
+
+    // Giant unarmed damage handled by boosting m_unarmedWeapon shared data in ActivateGiant/DeactivateGiant.
+
+    // ── Giant: reduce incoming damage to 10% while active ───────────────────
+    [HarmonyPatch(typeof(Character), "RPC_Damage")]
+    class GiantDamageResistPatch
+    {
+        static void Prefix(Character __instance, HitData hit)
+        {
+            if (__instance != Player.m_localPlayer) return;
+            if (Plugin.GiantExpiry <= 0f || Time.time > Plugin.GiantExpiry) return;
+            hit.m_damage.m_blunt    *= 0.1f;
+            hit.m_damage.m_slash    *= 0.1f;
+            hit.m_damage.m_pierce   *= 0.1f;
+            hit.m_damage.m_chop     *= 0.1f;
+            hit.m_damage.m_pickaxe  *= 0.1f;
+            hit.m_damage.m_fire     *= 0.1f;
+            hit.m_damage.m_frost    *= 0.1f;
+            hit.m_damage.m_lightning *= 0.1f;
+            hit.m_damage.m_poison   *= 0.1f;
+            hit.m_damage.m_spirit   *= 0.1f;
         }
     }
 
@@ -1354,12 +1655,13 @@ namespace EnvReporter
     [HarmonyPatch(typeof(ItemStand), "GetHoverText")]
     class ItemStandHoverPatch
     {
-        // Finalizer always runs last regardless of other mods' patch order
-        static void Finalizer(ItemStand __instance, ref string __result)
+        static void Postfix(ItemStand __instance, ref string __result)
         {
-            if (!Plugin.Cfg.Trophies.Enabled) return;
-            if (!__instance.HaveAttachment()) return;
+            bool hasAttach = __instance.HaveAttachment();
             string prefab = __instance.GetAttachedItem() ?? "";
+            Plugin.Log.LogInfo($"[Pilgrim] ItemStandHover: enabled={Plugin.Cfg.Trophies.Enabled} hasAttach={hasAttach} prefab='{prefab}' inMap={Plugin.TrophyToPower.ContainsKey(prefab)}");
+            if (!Plugin.Cfg.Trophies.Enabled) return;
+            if (!hasAttach) return;
             if (!Plugin.TrophyToPower.ContainsKey(prefab)) return;
             __result += "\n[<color=yellow>Shift+E</color>] Claim Forsaken Power";
         }
@@ -1383,6 +1685,7 @@ namespace EnvReporter
             if (nview == null || !nview.IsValid()) yield break;
             int level = nview.GetZDO()?.GetInt("ath_cart_level") ?? 0;
             if (level > 0) CartUpgrade.ApplySize(vagon, level);
+            CartUpgrade.ApplyTint(vagon, level);
         }
     }
 
@@ -1418,6 +1721,58 @@ namespace EnvReporter
         }
     }
 
+    // ── Harmony: ritual discovery on first-time item pickup ──────────────────
+
+    [HarmonyPatch(typeof(Player), "AddKnownItem")]
+    class RitualDiscoveryPatch
+    {
+        static void Postfix(Player __instance, ItemDrop.ItemData item)
+        {
+            if (__instance != Player.m_localPlayer) return;
+            if (!Plugin.Cfg.Rituals.Enabled) return;
+            string prefab = item.m_dropPrefab?.name ?? "";
+            if (string.IsNullOrEmpty(prefab)) return;
+
+            foreach (var (match, isPrefix, key, display) in Plugin.RitualItemMap)
+            {
+                bool matches = isPrefix ? prefab.StartsWith(match) : prefab == match;
+                if (!matches) continue;
+                if (!Plugin.Cfg.Rituals.Items.TryGetValue(key, out var r) || !r.Enabled) continue;
+                if (Plugin.IsRitualKnown(__instance, key)) continue;
+                Plugin.LearnRitual(__instance, key, display);
+            }
+        }
+    }
+
+    // ── Harmony: on load, silently unlock rituals for items already in inventory ──
+
+    [HarmonyPatch(typeof(Player), "OnSpawned")]
+    class RitualBackfillPatch
+    {
+        static void Postfix(Player __instance)
+        {
+            if (__instance != Player.m_localPlayer) return;
+            if (!Plugin.Cfg.Rituals.Enabled) return;
+
+            var inv = __instance.GetInventory();
+            if (inv == null) return;
+
+            foreach (var invItem in inv.GetAllItems())
+            {
+                string prefab = invItem.m_dropPrefab?.name ?? "";
+                if (string.IsNullOrEmpty(prefab)) continue;
+                foreach (var (match, isPrefix, key, _) in Plugin.RitualItemMap)
+                {
+                    if (Plugin.IsRitualKnown(__instance, key)) continue;
+                    if (!Plugin.Cfg.Rituals.Items.TryGetValue(key, out var r) || !r.Enabled) continue;
+                    bool matches = isPrefix ? prefab.StartsWith(match) : prefab == match;
+                    if (matches)
+                        __instance.m_customData[$"ath_known_{key}"] = "1"; // silent — no toast
+                }
+            }
+        }
+    }
+
     static class ItemUtil
     {
         public static int CountByPrefab(Inventory inv, string prefab) =>
@@ -1448,6 +1803,25 @@ namespace EnvReporter
             new[] { ("Silver",      5), ("WolfPelt",     5) },  // → level 3
             new[] { ("BlackMetal",  5), ("LoxPelt",      3) },  // → level 4
         };
+
+        // Subtle level tints: natural wood → bronze warmth → iron grey → silver shimmer → dark metal
+        static readonly Color[] LevelTints = {
+            new Color(1.00f, 1.00f, 1.00f), // 0 — default
+            new Color(1.00f, 0.82f, 0.55f), // 1 — bronze
+            new Color(0.70f, 0.72f, 0.75f), // 2 — iron
+            new Color(0.88f, 0.94f, 1.00f), // 3 — silver
+            new Color(0.30f, 0.26f, 0.22f), // 4 — black metal
+        };
+
+        public static void ApplyTint(Vagon vagon, int level)
+        {
+            level = Mathf.Clamp(level, 0, LevelTints.Length - 1);
+            var tint = LevelTints[level];
+            foreach (var r in vagon.GetComponentsInChildren<Renderer>(true))
+                foreach (var mat in r.materials)
+                    if (mat.HasProperty("_Color"))
+                        mat.color = tint;
+        }
 
         public static void ApplySize(Vagon vagon, int level)
         {
@@ -1532,6 +1906,7 @@ namespace EnvReporter
 
             nview.GetZDO()!.Set("ath_cart_level", nextLevel);
             ApplySize(cart, nextLevel);
+            ApplyTint(cart, nextLevel);
 
             int slots = BaseWidth * Heights[nextLevel];
             string done = "Cart reinforced.";
@@ -1655,6 +2030,33 @@ namespace EnvReporter
             }
 
 
+            if (Plugin.GiantExpiry > 0f && Time.time >= Plugin.GiantExpiry)
+            {
+                var gp = Player.m_localPlayer;
+                if (gp != null) Plugin.DeactivateGiant(gp);
+                else { Plugin.GiantExpiry = 0f; Plugin.GiantTargetScale = 1f; }
+            }
+
+            // Sync local player's target scale into their ZDO so other clients can read it
+            var gPlayer = Player.m_localPlayer;
+            if (gPlayer != null)
+            {
+                var localZdo = gPlayer.GetComponent<ZNetView>()?.GetZDO();
+                if (localZdo != null)
+                    localZdo.Set("ath_scale", Plugin.GiantTargetScale);
+            }
+
+            // Lerp ALL players toward their ZDO target scale (covers local + remote)
+            foreach (var p in Player.GetAllPlayers())
+            {
+                if (p == null) continue;
+                float target = p.GetComponent<ZNetView>()?.GetZDO()?.GetFloat("ath_scale", 1f) ?? 1f;
+                float cur    = p.transform.localScale.x;
+                if (Mathf.Approximately(cur, target)) continue;
+                float next = Mathf.MoveTowards(cur, target, Time.deltaTime * 0.4f);
+                p.transform.localScale = Vector3.one * next;
+            }
+
             if (Plugin.WaterWalkExpiry > 0f)
             {
                 if (Time.time >= Plugin.WaterWalkExpiry)
@@ -1741,8 +2143,8 @@ namespace EnvReporter
                 foreach (var mb in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>())
                 {
                     if (mb == null || mb.GetType().Name != "RandomFlyingBird") continue;
-                    if (Vector3.Distance(mb.transform.position, player.transform.position) > 60f) continue;
-                    StartCoroutine(DelayedRedirect(mb.gameObject, dir, speed, 5f));
+                    if (Vector3.Distance(mb.transform.position, player.transform.position) > 150f) continue;
+                    StartCoroutine(DelayedRedirect(mb.gameObject, dir, speed, 10f));
                 }
             }
 
@@ -1780,6 +2182,16 @@ namespace EnvReporter
                 -right * 14f + dir * -20f,
                  right * 14f + dir * -20f,
                  Vector3.up  *  4f + dir *  -2f,
+                -right *  4f + dir *  -5f + Vector3.up * 1.5f,
+                 right *  4f + dir *  -5f + Vector3.up * 1.5f,
+                -right *  7f + dir *  -9f + Vector3.up * 1f,
+                 right *  7f + dir *  -9f + Vector3.up * 1f,
+                -right * 10f + dir * -13f + Vector3.up * 2f,
+                 right * 10f + dir * -13f + Vector3.up * 2f,
+                -right * 13f + dir * -17f + Vector3.up * 1f,
+                 right * 13f + dir * -17f + Vector3.up * 1f,
+                -right *  1f + dir *  -3f + Vector3.up * 2.5f,
+                 right *  1f + dir *  -3f + Vector3.up * 2.5f,
             };
             for (int i = 0; i < offsets.Length; i++)
                 StartCoroutine(SingleBird(dir, speed, offsets[i], baseDelay + i * 0.25f));
@@ -1794,21 +2206,41 @@ namespace EnvReporter
         IEnumerator RedirectWorldBird(GameObject bird, Vector3 dir, float speed)
         {
             if (bird == null) yield break;
-            // Disable the bird's own AI so we take over movement
-            foreach (var mb in bird.GetComponentsInChildren<MonoBehaviour>())
-                if (mb != null && mb.GetType().Name == "RandomFlyingBird") mb.enabled = false;
+
+            // If bird is landed, swap to flying model before killing the script
+            var rf = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            foreach (var mb in bird.GetComponentsInChildren<MonoBehaviour>(true))
+            {
+                if (mb == null || mb.GetType().Name != "RandomFlyingBird") continue;
+                var flyModel    = mb.GetType().GetField("m_flyingModel", rf)?.GetValue(mb) as GameObject;
+                var landModel   = mb.GetType().GetField("m_landedModel", rf)?.GetValue(mb) as GameObject;
+                if (flyModel  != null) flyModel.SetActive(true);
+                if (landModel != null) landModel.SetActive(false);
+                break;
+            }
+
+            // Kill network sync and AI — ZSyncAnimation overrides SetBool every frame if left running
+            string[] killTypes = { "ZSyncAnimation", "ZSyncTransform", "RandomFlyingBird", "ZSFX" };
+            foreach (var mb in bird.GetComponentsInChildren<MonoBehaviour>(true))
+                if (mb != null && System.Array.IndexOf(killTypes, mb.GetType().Name) >= 0)
+                    Object.DestroyImmediate(mb);
+            foreach (var nv in bird.GetComponentsInChildren<ZNetView>(true))
+                Object.DestroyImmediate(nv);
             foreach (var ai in bird.GetComponentsInChildren<BaseAI>(true))
                 ai.enabled = false;
-            // Force flying animation
+
+            // Set flapping on the now-uncontested animator
             foreach (var comp in bird.GetComponentsInChildren<UnityEngine.Component>())
             {
                 var setbool = comp?.GetType().GetMethod("SetBool", new[] { typeof(string), typeof(bool) });
                 if (setbool != null) { setbool.Invoke(comp, new object[] { "flapping", true }); break; }
             }
+            yield return new WaitForSeconds(0.3f);
+            if (bird == null) yield break;
 
             float elapsed = 0f;
             float wobbleOffset = UnityEngine.Random.Range(0f, Mathf.PI * 2f);
-            while (bird != null && elapsed < 120f / speed)
+            while (bird != null && elapsed < 200f / speed)
             {
                 elapsed += Time.deltaTime;
                 var right2 = Vector3.Cross(Vector3.up, dir).normalized;
@@ -1957,12 +2389,13 @@ namespace EnvReporter
                     ["feather_fall"]  = new RitualItemConfig { Enabled = true, Item = "Feathers",   HoverText = "Fall without fear",          Message = "Light as a feather — fall without fear." },
                     ["seek_trader"]   = new RitualItemConfig { Enabled = true, Item = "Coins",      HoverText = "Seek a merchant",            Message = "Gold calls to gold..." },
                     ["seek_dungeon"]  = new RitualItemConfig { Enabled = true, Item = "Trophy*",    HoverText = "Seek the nearest dungeon",   Message = "The veil parts — something stirs nearby." },
-                    ["clear_skies"]   = new RitualItemConfig { Enabled = true, Item = "MeadBase*",  HoverText = "Clear the skies",            Message = "The clouds part.", Duration = 900f },
+                    ["clear_skies"]   = new RitualItemConfig { Enabled = true, Item = "GreydwarfEye", HoverText = "Clear the skies",          Message = "The clouds part.", Duration = 900f },
                     ["water_walk"]    = new RitualItemConfig { Enabled = true, Item = "Stone",      HoverText = "Walk on water",              Message = "The sea grows still beneath your feet.", Duration = 60f },
                     ["growth"]        = new RitualItemConfig { Enabled = true, Item = "AncientSeed",HoverText = "Bless your crops",           Message = "The seed remembers the earth. Sleep, and your crops will answer." },
                     ["seek_player"]   = new RitualItemConfig { Enabled = true, Item = "Flint",      HoverText = "Seek a fellow pilgrim",      Message = "Find fellowship." },
                     ["kindle"]        = new RitualItemConfig { Enabled = true, Item = "Resin",      HoverText = "Kindle nearby fires",        Message = "The darkness yields." },
                     ["tame_flock"]    = new RitualItemConfig { Enabled = true, Item = "BoneFragments", HoverText = "Tame the flock",          Message = "The bones remember loyalty. Sleep, and your flock will answer." },
+                    ["giant"]         = new RitualItemConfig { Enabled = true, Item = "YmirRemains",   HoverText = "Become the mountain",      Message = "The mountain answers. You are vast.", Duration = 60f },
                 },
             },
         };

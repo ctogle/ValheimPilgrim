@@ -6,6 +6,14 @@ Pilgrim/obj/
 *.user
 .vs/
 
+# Package output
+dist/
+*.zip
+
+# Machine-specific build config — copy Pilgrim.csproj.template and fill in your paths
+Pilgrim/Pilgrim.csproj
+deploy.sh
+
 # OS
 Thumbs.db
 .DS_Store
