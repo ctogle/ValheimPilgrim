@@ -14,7 +14,7 @@ denikson-BepInExPack_Valheim = "5.4.2202"
 ValheimModding-YamlDotNet = "13.1.1"
 
 [build]
-icon = "./Pilgrim/icon.png"
+icon = "./icon.png"
 readme = "./README_thunderstore.md"
 outdir = "./dist"
 
