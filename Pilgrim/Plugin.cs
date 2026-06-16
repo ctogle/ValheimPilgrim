@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "1.0.0")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.0.1")]
     public class Plugin : BaseUnityPlugin
     {
         internal static BepInEx.Logging.ManualLogSource Log = null!;
@@ -120,6 +120,7 @@ namespace EnvReporter
         internal static float FeatherRitualExpiry  = 0f;
         internal static float ClearSkiesExpiry     = 0f;
         internal static float RainExpiry           = 0f;
+        internal static float GiantRainExpiry      = 0f;
         internal static float WaterWalkExpiry      = 0f;
         internal static float SeekEnvExpiry        = 0f;
         internal static float DungeonEnvExpiry     = 0f;
@@ -139,6 +140,8 @@ namespace EnvReporter
         static float               _origAttackRange;
         static float               _origAttackHeight;
         static float               _origAttackOffset;
+        static float               _origAutoPickupRange;
+        static float               _origSwimDepth;
 
         // Boss trophy → guardian power
         internal static readonly Dictionary<string, string> TrophyToPower = new Dictionary<string, string>
@@ -272,6 +275,7 @@ namespace EnvReporter
             {
                 ClearSkiesExpiry = 0f;
                 RainExpiry       = 0f;
+                GiantRainExpiry  = 0f;
                 WaterWalkExpiry  = 0f;
                 SeekEnvExpiry    = 0f;
                 DungeonEnvExpiry = 0f;
@@ -815,6 +819,7 @@ namespace EnvReporter
                 unarmed.m_attack.m_attackHeight = _origAttackHeight * GiantScale;
                 unarmed.m_attack.m_attackOffset = _origAttackOffset * GiantScale;
             }
+            VdsSwimSuppressor.Suppress();
             if (EnvMan.instance != null) EnvMan.instance.m_debugEnv = "GoldenAscent";
             player.Message(MessageHud.MessageType.Center, message);
         }
@@ -822,20 +827,27 @@ namespace EnvReporter
         internal static void ApplyGiantSpeed(Player player)
         {
             if (GiantSpeedApplied) return;
-            player.m_walkSpeed  *= GiantWalkMult;
-            player.m_runSpeed   *= GiantRunMult;
-            player.m_swimSpeed  *= GiantWalkMult;
-            player.m_jumpForce  *= GiantJumpMult;
+            player.m_walkSpeed   *= GiantWalkMult;
+            player.m_runSpeed    *= GiantRunMult;
+            player.m_swimSpeed   *= GiantWalkMult;
+            player.m_jumpForce   *= GiantJumpMult;
+            _origAutoPickupRange      = player.m_autoPickupRange;
+            player.m_autoPickupRange  = 0f;
+            _origSwimDepth            = player.m_swimDepth;
+            player.m_swimDepth        = _origSwimDepth * GiantScale;
             GiantSpeedApplied = true;
+            player.Message(MessageHud.MessageType.TopLeft, "Auto-pickup disabled while giant.");
         }
 
         internal static void RemoveGiantSpeed(Player player)
         {
             if (!GiantSpeedApplied) return;
-            player.m_walkSpeed  /= GiantWalkMult;
-            player.m_runSpeed   /= GiantRunMult;
-            player.m_swimSpeed  /= GiantWalkMult;
-            player.m_jumpForce  /= GiantJumpMult;
+            player.m_walkSpeed   /= GiantWalkMult;
+            player.m_runSpeed    /= GiantRunMult;
+            player.m_swimSpeed   /= GiantWalkMult;
+            player.m_jumpForce   /= GiantJumpMult;
+            player.m_autoPickupRange  = _origAutoPickupRange;
+            player.m_swimDepth        = _origSwimDepth;
             GiantSpeedApplied = false;
         }
 
@@ -856,7 +868,9 @@ namespace EnvReporter
             }
             player.m_maxCarryWeight = Mathf.Max(player.m_maxCarryWeight - GiantCarryBonus, 300f);
             player.GetSEMan().RemoveStatusEffect(GiantSE?.NameHash() ?? 0);
-            if (EnvMan.instance?.m_debugEnv == "GoldenAscent") EnvMan.instance.m_debugEnv = "";
+            VdsSwimSuppressor.Restore();
+            if (EnvMan.instance?.m_debugEnv == "GoldenAscent") EnvMan.instance.m_debugEnv = "Rain";
+            GiantRainExpiry = Time.time + 600f;
             player.Message(MessageHud.MessageType.TopLeft, "You return to mortal scale.");
         }
 
@@ -1604,6 +1618,59 @@ namespace EnvReporter
         }
     }
 
+    // ── Giant: offset water surface so VikingsDoSwim positions character at correct depth ──
+    [HarmonyPatch(typeof(WaterVolume), "GetWaterSurface")]
+    class GiantWaterSurfacePatch
+    {
+        static void Postfix(ref float __result)
+        {
+            if (Plugin.GiantExpiry <= 0f || Time.time >= Plugin.GiantExpiry) return;
+            __result -= (Plugin.GiantScale - 1f) * 1.2f;
+        }
+    }
+
+    // ── Giant: suppress VikingsDoSwim's OnSwimming patch while giant ─────────
+    static class VdsSwimSuppressor
+    {
+        const string VdsGuid = "blacks7ar.VikingsDoSwim";
+        static readonly Harmony _h = new Harmony("com.ctogle.pilgrim.vdssuppressor");
+        static readonly System.Reflection.MethodInfo _target =
+            typeof(Character).GetMethod("OnSwimming", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+
+        // Saved VDS patch methods so we can restore them
+        static readonly List<(System.Reflection.MethodInfo method, HarmonyPatchType type)> _saved = new();
+
+        internal static void Suppress()
+        {
+            if (_target == null) return;
+            var info = Harmony.GetPatchInfo(_target);
+            if (info == null) return;
+            _saved.Clear();
+            foreach (var p in info.Prefixes)
+                if (p.owner == VdsGuid) { _h.Unpatch(_target, p.PatchMethod); _saved.Add((p.PatchMethod, HarmonyPatchType.Prefix)); }
+            foreach (var p in info.Postfixes)
+                if (p.owner == VdsGuid) { _h.Unpatch(_target, p.PatchMethod); _saved.Add((p.PatchMethod, HarmonyPatchType.Postfix)); }
+            foreach (var p in info.Transpilers)
+                if (p.owner == VdsGuid) { _h.Unpatch(_target, p.PatchMethod); _saved.Add((p.PatchMethod, HarmonyPatchType.Transpiler)); }
+        }
+
+        internal static void Restore()
+        {
+            if (_target == null) return;
+            foreach (var (method, type) in _saved)
+            {
+                var hm = new HarmonyMethod(method);
+                switch (type)
+                {
+                    case HarmonyPatchType.Prefix:     _h.Patch(_target, prefix: hm);     break;
+                    case HarmonyPatchType.Postfix:    _h.Patch(_target, postfix: hm);    break;
+                    case HarmonyPatchType.Transpiler: _h.Patch(_target, transpiler: hm); break;
+                }
+            }
+            _saved.Clear();
+        }
+    }
+
     // ── Cart: quick release + ritual detection handled in EnvScheduler.Update ──
     // (see EnvScheduler.Update below)
 
@@ -1655,15 +1722,17 @@ namespace EnvReporter
     [HarmonyPatch(typeof(ItemStand), "GetHoverText")]
     class ItemStandHoverPatch
     {
-        static void Postfix(ItemStand __instance, ref string __result)
+        // Finalizer runs after ALL other mods' patches — guarantees our line survives
+        static System.Exception Finalizer(System.Exception __exception, ItemStand __instance, ref string __result)
         {
-            bool hasAttach = __instance.HaveAttachment();
-            string prefab = __instance.GetAttachedItem() ?? "";
-            Plugin.Log.LogInfo($"[Pilgrim] ItemStandHover: enabled={Plugin.Cfg.Trophies.Enabled} hasAttach={hasAttach} prefab='{prefab}' inMap={Plugin.TrophyToPower.ContainsKey(prefab)}");
-            if (!Plugin.Cfg.Trophies.Enabled) return;
-            if (!hasAttach) return;
-            if (!Plugin.TrophyToPower.ContainsKey(prefab)) return;
-            __result += "\n[<color=yellow>Shift+E</color>] Claim Forsaken Power";
+            if (Plugin.Cfg.Trophies.Enabled && __instance.HaveAttachment())
+            {
+                string prefab = __instance.GetAttachedItem() ?? "";
+                if (Plugin.TrophyToPower.ContainsKey(prefab) &&
+                    !__result.Contains("Shift+E"))
+                    __result += "\n[<color=yellow>Shift+E</color>] Claim Forsaken Power";
+            }
+            return __exception;
         }
     }
 
@@ -1971,6 +2040,21 @@ namespace EnvReporter
                 {
                     // Console or another system changed it — respect that and cancel
                     Plugin.ClearSkiesExpiry = 0f;
+                }
+            }
+
+            // Giant aftermath rain
+            if (Plugin.GiantRainExpiry > 0f)
+            {
+                var em = EnvMan.instance;
+                if (Time.time >= Plugin.GiantRainExpiry)
+                {
+                    if (em != null && em.m_debugEnv == "Rain") em.m_debugEnv = "";
+                    Plugin.GiantRainExpiry = 0f;
+                }
+                else if (em != null && em.m_debugEnv != "Rain")
+                {
+                    Plugin.GiantRainExpiry = 0f;
                 }
             }
 
@@ -2363,6 +2447,7 @@ namespace EnvReporter
                 em.m_debugEnv = "";
             _setByUs = null;
         }
+
     }
 
     // ── Config classes ───────────────────────────────────────────────────────

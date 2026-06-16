@@ -4,7 +4,7 @@ schemaVersion = "0.0.1"
 [package]
 namespace = "ctogle"
 name = "Pilgrim"
-versionNumber = "0.1.0"
+versionNumber = "0.0.1"
 description = "Ritual-based progression for Valheim. Offer items at campfires to unlock powers, seek waypoints, and survive the pilgrimage."
 websiteUrl = "https://github.com/ctogle/ValheimPilgrim"
 containsNsfwContent = false
