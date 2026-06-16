@@ -1,6 +1,6 @@
 {
   "name": "Pilgrim",
-  "version_number": "0.0.1",
+  "version_number": "0.2.0",
   "website_url": "https://github.com/ctogle/ValheimPilgrim",
   "description": "Make offerings to the flames, use forsaken trophies from any item stand, upgrade your cart for the nomad lifestyle",
   "dependencies": [
