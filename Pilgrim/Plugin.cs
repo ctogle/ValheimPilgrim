@@ -19,6 +19,7 @@ namespace EnvReporter
         internal static SE_GuidingWind? GuidingWindSE;
         internal static SE_WaterWalk?   WaterWalkSE;
         internal static SE_Giant?       GiantSE;
+        internal static SE_FlamingSword? FlamingSwordSE;
 
         // ── Config ──────────────────────────────────────────────────────────
         internal static PilgrimConfig Cfg = PilgrimConfig.Default();
@@ -46,6 +47,26 @@ namespace EnvReporter
                     .IgnoreUnmatchedProperties()
                     .Build();
                 Cfg = des.Deserialize<PilgrimConfig>(File.ReadAllText(ConfigPath));
+
+                // Backfill any ritual keys missing from the on-disk config (e.g. added in a later version)
+                var defaults = PilgrimConfig.Default();
+                bool backfilled = false;
+                foreach (var (key, val) in defaults.Rituals.Items)
+                {
+                    if (Cfg.Rituals.Items.ContainsKey(key)) continue;
+                    Cfg.Rituals.Items[key] = val;
+                    backfilled = true;
+                }
+                if (backfilled)
+                {
+                    var yaml = new SerializerBuilder()
+                        .WithNamingConvention(UnderscoredNamingConvention.Instance)
+                        .Build()
+                        .Serialize(Cfg);
+                    File.WriteAllText(ConfigPath, yaml);
+                    Log.LogInfo("[Pilgrim] Backfilled missing ritual config keys.");
+                }
+
                 Log.LogInfo("[Pilgrim] Config loaded.");
             }
             catch (System.Exception ex)
@@ -64,7 +85,8 @@ namespace EnvReporter
         internal static string PlayerSeekFood => Cfg.Rituals.Items.GetValueOrDefault("seek_player")?.Item  ?? "Flint";
         internal static string KindleFood    => Cfg.Rituals.Items.GetValueOrDefault("kindle")?.Item        ?? "Resin";
         internal static string TameFood     => Cfg.Rituals.Items.GetValueOrDefault("tame_flock")?.Item    ?? "BoneFragments";
-        internal static string GiantFood    => Cfg.Rituals.Items.GetValueOrDefault("giant")?.Item         ?? "YmirRemains";
+        internal static string GiantFood        => Cfg.Rituals.Items.GetValueOrDefault("giant")?.Item          ?? "YmirRemains";
+        internal static string FlamingSwordFood => Cfg.Rituals.Items.GetValueOrDefault("flaming_sword")?.Item ?? "SurtlingCore";
         // Wildcards: Trophy* → dungeon seek, Mushroom* → restore power
         // (prefix matching stays hardcoded; hover text and messages come from config)
 
@@ -102,6 +124,7 @@ namespace EnvReporter
             ("Flint",         false, "seek_player",   "Flint"),
             ("Resin",         false, "kindle",        "Resin"),
             ("YmirRemains",   false, "giant",         "Ymir Flesh"),
+            ("SurtlingCore",  false, "flaming_sword", "Surtling Core"),
         };
 
         // Global ritual cooldown
@@ -127,6 +150,10 @@ namespace EnvReporter
         internal static float HomeEnvExpiry        = 0f;
         internal static bool  GrowthBlessingActive = false;
         internal static bool  TameBlessingActive   = false;
+        internal static float FlamingSwordExpiry   = 0f;
+        static ItemDrop.ItemData? _flamingSwordItem = null;
+        static ItemDrop.ItemData? _origRightItem    = null;
+        internal const string FlamingSwordPrefab = "SwordIronFire";
         internal static float GiantExpiry          = 0f;
         internal static float GiantTargetScale     = 1f;
         internal const  float GiantCarryBonus      = 300f;
@@ -470,6 +497,7 @@ namespace EnvReporter
                 }
                 if (found == 0) args.Context.AddString("No birds within 60m.");
             });
+
 
             new Terminal.ConsoleCommand("ath_envdump", "dumps env-related EnvMan fields", args =>
             {
@@ -874,6 +902,118 @@ namespace EnvReporter
             player.Message(MessageHud.MessageType.TopLeft, "You return to mortal scale.");
         }
 
+        // ── Flaming sword ritual ────────────────────────────────────────────
+
+        internal static void ActivateFlamingSword(Player player, string message = "Dyrnwyn answers. Let it burn.")
+        {
+            // Deactivate any existing imbue before applying a new one
+            if (FlamingSwordExpiry > 0f) DeactivateFlamingSword(player, immediate: true);
+
+            var rf2 = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+            var currentRight = typeof(Humanoid).GetField("m_rightItem", rf2)?.GetValue(player) as ItemDrop.ItemData;
+
+            // Pull the held weapon out of the inventory list (kept by reference) to free its slot
+            if (currentRight != null)
+            {
+                player.UnequipItem(currentRight);
+                player.GetInventory().RemoveItem(currentRight);
+            }
+
+            var newItem = player.GetInventory().AddItem(FlamingSwordPrefab, 1, 1, 0, 0L, "");
+            if (newItem == null)
+            {
+                player.Message(MessageHud.MessageType.Center, "No room in your pack for the flame.");
+                if (currentRight != null) { player.GetInventory().AddItem(currentRight); player.EquipItem(currentRight); }
+                return;
+            }
+
+            _origRightItem    = currentRight;
+            _flamingSwordItem = newItem;
+            player.EquipItem(newItem);
+            SpawnSmokePuff(player);
+
+            float duration = Cfg.Rituals.Items.GetValueOrDefault("flaming_sword")?.Duration ?? 60f;
+            FlamingSwordExpiry = Time.time + duration;
+
+            var se = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == "SE_FlamingSword") ?? FlamingSwordSE;
+            if (se != null) { se.m_ttl = duration; player.GetSEMan().AddStatusEffect(se, true); }
+
+            TryPlayEmote(player, "cheer");
+
+            // One-shot lightning strike on the sword (right-hand attach point), delayed to land on the cheer's peak
+            Scheduler?.RunDelayed(0.5f, () =>
+            {
+                var scene = ZNetScene.instance;
+                var lightningPrefab = scene?.GetPrefab("fx_chainlightning_hit");
+                if (lightningPrefab == null) return;
+                Transform? handPt = player.transform.Find("Visual/Armature/Hips/Spine/Spine1/Spine2/RightShoulder/RightArm/RightForeArm/RightHand/RightHandMiddle1")
+                                 ?? player.transform;
+                Vector3 strikePos = handPt.position + Vector3.up * 0.5f + player.transform.forward * 0.5f;
+                var lvfx = Object.Instantiate(lightningPrefab, strikePos, Quaternion.identity);
+                Object.Destroy(lvfx, 4f);
+                Log.LogInfo("[Pilgrim] FlamingSword VFX: fx_chainlightning_hit");
+            });
+
+            player.Message(MessageHud.MessageType.Center, message);
+            Log.LogInfo($"[Pilgrim] FlamingSword: swapped in {FlamingSwordPrefab} for {duration}s");
+        }
+
+        static void TryPlayEmote(Player player, string emoteName)
+        {
+            try
+            {
+                if (player != Player.m_localPlayer) return;
+                player.StartEmote(emoteName, true);
+            }
+            catch (System.Exception ex)
+            {
+                Log.LogWarning($"[Pilgrim] TryPlayEmote failed: {ex.Message}");
+            }
+        }
+
+        internal static void DeactivateFlamingSword(Player player, bool immediate = false)
+        {
+            FlamingSwordExpiry = 0f;
+
+            var novaPrefab = ZNetScene.instance?.GetPrefab("fx_fireskeleton_nova");
+            if (novaPrefab != null)
+                Object.Instantiate(novaPrefab, player.transform.position, Quaternion.identity);
+
+            if (immediate)
+                FinishSwordSwapBack(player);
+            else
+                Scheduler?.RunDelayed(0.5f, () => FinishSwordSwapBack(player));
+        }
+
+        static void FinishSwordSwapBack(Player player)
+        {
+            if (_flamingSwordItem != null)
+            {
+                player.UnequipItem(_flamingSwordItem);
+                player.GetInventory().RemoveItem(_flamingSwordItem);
+                if (_origRightItem != null)
+                {
+                    player.GetInventory().AddItem(_origRightItem);
+                    player.EquipItem(_origRightItem);
+                }
+                _flamingSwordItem = null;
+                _origRightItem    = null;
+            }
+            SpawnSmokePuff(player);
+            player.GetSEMan().RemoveStatusEffect(FlamingSwordSE?.NameHash() ?? 0);
+            player.Message(MessageHud.MessageType.TopLeft, "The flame fades.");
+        }
+
+        static void SpawnSmokePuff(Player player)
+        {
+            var smokePrefab = ZNetScene.instance?.GetPrefab("vfx_Smoked");
+            if (smokePrefab == null) return;
+            Transform? handPt = player.transform.Find("Visual/Armature/Hips/Spine/Spine1/Spine2/RightShoulder/RightArm/RightForeArm/RightHand/RightHandMiddle1")
+                             ?? player.transform;
+            var svfx = Object.Instantiate(smokePrefab, handPt.position, Quaternion.identity);
+            Object.Destroy(svfx, 3f);
+        }
+
         // ── Trophy shrine logic ─────────────────────────────────────────────
 
         internal static void GrantTrophyPower(Player player, string trophyPrefab, Terminal? ctx = null, UnityEngine.Vector3? vfxPos = null)
@@ -1169,6 +1309,7 @@ namespace EnvReporter
                     "seek_player"   => "Flint",
                     "kindle"        => "Resin",
                     "giant"         => "Ymir Flesh",
+                    "flaming_sword" => "Surtling Core",
                     _               => key,
                 };
                 rows.Append($"\n  <color=yellow>{itemLabel}</color> — {r.HoverText}");
@@ -1241,7 +1382,8 @@ namespace EnvReporter
                          || (prefab == Plugin.PlayerSeekFood && RitualEnabled("seek_player"))
                          || (prefab == Plugin.KindleFood     && RitualEnabled("kindle"))
                          || (prefab == Plugin.TameFood       && RitualEnabled("tame_flock"))
-                         || (prefab == Plugin.GiantFood       && RitualEnabled("giant"));
+                         || (prefab == Plugin.GiantFood       && RitualEnabled("giant"))
+                         || (prefab == Plugin.FlamingSwordFood && RitualEnabled("flaming_sword"));
             if (!isRitual) return true;
 
             // Global cooldown check
@@ -1323,6 +1465,8 @@ namespace EnvReporter
                 if (RitualEnabled("giant"))
                 { Consume(); Plugin.ActivateGiant(__instance, RitualMsg("giant", "The mountain answers. You are vast.")); return false; }
             }
+            if (prefab == Plugin.FlamingSwordFood && RitualEnabled("flaming_sword"))
+            { Consume(); Plugin.ActivateFlamingSword(__instance, RitualMsg("flaming_sword", "Dyrnwyn answers. Let it burn.")); return false; }
 
             // Catch-all: suppress vanilla for any ritual item so we never see game rejection messages
             foreach (var (match, isPrefix, key, _) in Plugin.RitualItemMap)
@@ -1551,6 +1695,16 @@ namespace EnvReporter
             giant.m_stopMessage  = "";
             __instance.m_StatusEffects.Add(giant);
             Plugin.GiantSE = giant;
+
+            var dyrnwyn = ScriptableObject.CreateInstance<SE_FlamingSword>();
+            dyrnwyn.name           = "SE_FlamingSword";
+            dyrnwyn.m_name         = "Dyrnwyn";
+            dyrnwyn.m_tooltip      = "A blade of fire, summoned and bound to flicker out in time.";
+            dyrnwyn.m_ttl          = 60f;
+            dyrnwyn.m_startMessage = "";
+            dyrnwyn.m_stopMessage  = "";
+            __instance.m_StatusEffects.Add(dyrnwyn);
+            Plugin.FlamingSwordSE = dyrnwyn;
         }
     }
 
@@ -1589,6 +1743,35 @@ namespace EnvReporter
         public override string GetIconText()
         {
             float remaining = Mathf.Max(0f, Plugin.GiantExpiry - Time.time);
+            int mins = (int)(remaining / 60);
+            int secs = (int)(remaining % 60);
+            return mins > 0 ? $"{mins}m {secs:D2}s" : $"{secs}s";
+        }
+    }
+
+    public class SE_FlamingSword : StatusEffect
+    {
+        public override void Setup(Character character)
+        {
+            base.Setup(character);
+            var prefab = ZNetScene.instance?.GetPrefab(Plugin.FlamingSwordPrefab);
+            var shared = prefab?.GetComponent<ItemDrop>()?.m_itemData?.m_shared;
+            if (shared?.m_icons != null && shared.m_icons.Length > 0)
+            {
+                m_icon = shared.m_icons[0];
+                return;
+            }
+            string[] candidates = { "SE_Burning", "GP_Eikthyr", "Rested" };
+            foreach (var c in candidates)
+            {
+                var src = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == c);
+                if (src?.m_icon != null) { m_icon = src.m_icon; break; }
+            }
+        }
+
+        public override string GetIconText()
+        {
+            float remaining = Mathf.Max(0f, Plugin.FlamingSwordExpiry - Time.time);
             int mins = (int)(remaining / 60);
             int secs = (int)(remaining % 60);
             return mins > 0 ? $"{mins}m {secs:D2}s" : $"{secs}s";
@@ -2020,6 +2203,14 @@ namespace EnvReporter
 
         static readonly string[] CampfirePrefabs = { "fire_pit", "fire_pit_iron", "hearth" };
 
+        public void RunDelayed(float delay, System.Action action) => StartCoroutine(DelayedAction(delay, action));
+
+        IEnumerator DelayedAction(float delay, System.Action action)
+        {
+            yield return new WaitForSeconds(delay);
+            action();
+        }
+
         void Update()
         {
             // Tick global ritual cooldown
@@ -2119,6 +2310,13 @@ namespace EnvReporter
                 var gp = Player.m_localPlayer;
                 if (gp != null) Plugin.DeactivateGiant(gp);
                 else { Plugin.GiantExpiry = 0f; Plugin.GiantTargetScale = 1f; }
+            }
+
+            if (Plugin.FlamingSwordExpiry > 0f && Time.time >= Plugin.FlamingSwordExpiry)
+            {
+                var fp = Player.m_localPlayer;
+                if (fp != null) Plugin.DeactivateFlamingSword(fp);
+                else Plugin.FlamingSwordExpiry = 0f;
             }
 
             // Sync local player's target scale into their ZDO so other clients can read it
@@ -2481,6 +2679,7 @@ namespace EnvReporter
                     ["kindle"]        = new RitualItemConfig { Enabled = true, Item = "Resin",      HoverText = "Kindle nearby fires",        Message = "The darkness yields." },
                     ["tame_flock"]    = new RitualItemConfig { Enabled = true, Item = "BoneFragments", HoverText = "Tame the flock",          Message = "The bones remember loyalty. Sleep, and your flock will answer." },
                     ["giant"]         = new RitualItemConfig { Enabled = true, Item = "YmirRemains",   HoverText = "Become the mountain",      Message = "The mountain answers. You are vast.", Duration = 60f },
+                    ["flaming_sword"] = new RitualItemConfig { Enabled = true, Item = "SurtlingCore", HoverText = "Summon Dyrnwyn", Message = "Dyrnwyn answers. Let it burn.", Duration = 60f },
                 },
             },
         };
