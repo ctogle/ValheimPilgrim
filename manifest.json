@@ -1,8 +1,8 @@
 {
   "name": "Pilgrim",
-  "version_number": "0.2.0",
+  "version_number": "0.1.0",
   "website_url": "https://github.com/ctogle/ValheimPilgrim",
-  "description": "Make offerings to the flames, use forsaken trophies from any item stand, upgrade your cart for the nomad lifestyle",
+  "description": "Pilgrim introduces new mechanics that make it easier to avoid backtracking.",
   "dependencies": [
     "denikson-BepInExPack_Valheim-5.4.2202",
     "ValheimModding-YamlDotNet-16.3.1"

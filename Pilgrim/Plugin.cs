@@ -2299,7 +2299,7 @@ namespace EnvReporter
 
         static void Postfix(Container __instance)
         {
-            if (!Plugin.Cfg.Carts.Enabled) return;
+            if (!Plugin.Cfg.Ships.Enabled) return;
             var ship = __instance.GetComponentInParent<Ship>();
             if (ship == null) return;
             string rawName = ship.gameObject.name.ToLower().Replace("(clone)", "").Trim();
@@ -3165,12 +3165,14 @@ namespace EnvReporter
     {
         public TrophiesConfig  Trophies { get; set; } = new TrophiesConfig();
         public CartsConfig     Carts    { get; set; } = new CartsConfig();
+        public ShipsConfig     Ships    { get; set; } = new ShipsConfig();
         public RitualsConfig   Rituals  { get; set; } = new RitualsConfig();
 
         public static PilgrimConfig Default() => new PilgrimConfig
         {
             Trophies = new TrophiesConfig { Enabled = true, Vfx = "fx_fireskeleton_nova" },
             Carts    = new CartsConfig    { Enabled = true },
+            Ships    = new ShipsConfig    { Enabled = true },
             Rituals  = new RitualsConfig
             {
                 Enabled  = true,
@@ -3203,6 +3205,11 @@ namespace EnvReporter
     }
 
     public class CartsConfig
+    {
+        public bool Enabled { get; set; } = true;
+    }
+
+    public class ShipsConfig
     {
         public bool Enabled { get; set; } = true;
     }
