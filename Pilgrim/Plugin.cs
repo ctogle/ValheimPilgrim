@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.0.1")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.2.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static BepInEx.Logging.ManualLogSource Log = null!;
@@ -104,8 +104,9 @@ namespace EnvReporter
             if (!Cfg.Rituals.Items.TryGetValue(key, out var r)) return;
             player.Message(MessageHud.MessageType.TopLeft,
                 $"<color=orange>Ritual discovered:</color> {r.HoverText}");
-            player.Message(MessageHud.MessageType.Center,
-                $"<color=orange>Ritual discovered</color>\n{r.HoverText}\nOffer <color=yellow>{itemDisplayName}</color> at a burning campfire.");
+            var centerMsg = $"<color=orange>Ritual discovered</color>\n{r.HoverText}\nOffer <color=yellow>{itemDisplayName}</color> at a burning campfire.";
+            MessageHudTimerPatch.ExtendNextCenter = true;
+            player.Message(MessageHud.MessageType.Center, centerMsg);
         }
 
         // (prefab, isPrefix, ritualKey, displayName) — order matters for wildcard checks
@@ -149,6 +150,7 @@ namespace EnvReporter
         internal static float DungeonEnvExpiry     = 0f;
         internal static float HomeEnvExpiry        = 0f;
         internal static bool  GrowthBlessingActive = false;
+        internal static bool  ShowHintsEnabled     = true;
         internal static bool  TameBlessingActive   = false;
         internal static float FlamingSwordExpiry   = 0f;
         static ItemDrop.ItemData? _flamingSwordItem = null;
@@ -202,6 +204,50 @@ namespace EnvReporter
             DontDestroyOnLoad(go);
             Scheduler = go.AddComponent<EnvScheduler>();
             Logger.LogInfo("Pilgrim loaded.");
+        }
+
+        // Broadcast a bird formation to all connected clients so everyone sees it.
+        internal static void BroadcastBird(Vector3 direction, float speed = 10f)
+        {
+            Scheduler?.SendBird(direction, speed);
+            ZRoutedRpc.instance?.InvokeRoutedRPC(ZRoutedRpc.Everybody, "Pilgrim_SendBird",
+                direction, speed);
+        }
+
+        // Spawn a VFX prefab at pos on every client (including self).
+        internal static void BroadcastVfx(Vector3 pos, string prefabName, float destroyDelay = 4f, Quaternion? rot = null)
+        {
+            var r = rot ?? Quaternion.identity;
+            var prefab = ZNetScene.instance?.GetPrefab(prefabName);
+            if (prefab != null)
+                SpawnVfxLocal(prefab, pos, r, destroyDelay);
+            ZRoutedRpc.instance?.InvokeRoutedRPC(ZRoutedRpc.Everybody, "Pilgrim_SpawnVfx",
+                pos, r, prefabName, destroyDelay);
+        }
+
+        // Safe local VFX spawn: instantiate inactive so ZNetView.Awake never fires and never
+        // registers in m_instances. Without this, Object.Destroy(go, delay) would bypass
+        // ZNetScene cleanup and leave a stale ZDO entry → NullRef in RemoveObjects.
+        internal static void SpawnVfxLocal(GameObject prefab, Vector3 pos, Quaternion rot, float destroyDelay)
+        {
+            prefab.SetActive(false);
+            var go = UnityEngine.Object.Instantiate(prefab, pos, rot);
+            prefab.SetActive(true);
+            // Destroy all components that call GetComponent<ZNetView> in Awake before activating.
+            string[] netTypes = { "ZNetView", "ZSyncTransform", "ZSyncAnimation", "ZSFX", "TimedDestruction" };
+            foreach (var mb in go.GetComponentsInChildren<MonoBehaviour>(true))
+                if (mb != null && System.Array.IndexOf(netTypes, mb.GetType().Name) >= 0)
+                    UnityEngine.Object.DestroyImmediate(mb);
+            go.SetActive(true);
+            if (destroyDelay > 0f) UnityEngine.Object.Destroy(go, destroyDelay);
+        }
+
+        // Force a debug environment on every client.
+        internal static void BroadcastEnv(string name, string vanillaFallback = "")
+        {
+            SetDebugEnvSafe(name, vanillaFallback);
+            ZRoutedRpc.instance?.InvokeRoutedRPC(ZRoutedRpc.Everybody, "Pilgrim_SetEnv",
+                name, vanillaFallback);
         }
 
         void Update()
@@ -367,8 +413,24 @@ namespace EnvReporter
                     "w" => new Vector3(-1, 0, 0),
                     _   => new Vector3(0, 0, 1),  // north = +Z
                 };
-                Scheduler.SendBird(direction);
+                BroadcastBird(direction);
                 args.Context.AddString($"Bird away ({dir}).");
+            });
+
+            // ── ath_traders ─────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("ath_traders",
+                "show trader met status and distances", args =>
+            {
+                var player = Player.m_localPlayer;
+                if (player == null) { args.Context.AddString("No player."); return; }
+                args.Context.AddString("=== Trader State ===");
+                foreach (var loc in Plugin.TraderLocations)
+                {
+                    bool met = Plugin.HasMetTrader(loc);
+                    bool found = Plugin.FindClosestLocation(loc, player.transform.position, out Vector3 pos);
+                    string dist = found ? $"{Vector3.Distance(player.transform.position, pos):F0}m" : "not found";
+                    args.Context.AddString($"  {loc}: met={met}  dist={dist}  pos={pos}");
+                }
             });
 
             // ── ath_rituals ─────────────────────────────────────────────────
@@ -382,6 +444,17 @@ namespace EnvReporter
                 args.Context.AddString($"  {FeatherFood} (Feathers)    → Feather Fall — no fall damage 60s");
                 args.Context.AddString($"  Any Trophy                  → Dungeon Seeker — find nearest dungeon");
                 args.Context.AddString($"Global cooldown: {RitualCooldownDuration}s. Hold item in slot 1, look at burning campfire, press 1.");
+            });
+
+            // ── ath_hints ───────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("ath_hints",
+                "ath_hints [on|off] — toggle campfire ritual hover hint text", args =>
+            {
+                bool newVal = args.Args.Length > 1
+                    ? args.Args[1].ToLower() == "on"
+                    : !ShowHintsEnabled;
+                ShowHintsEnabled = newVal;
+                args.Context.AddString($"Ritual hints: {(ShowHintsEnabled ? "ON" : "OFF")}");
             });
 
             // ── ath_learn / ath_forget ──────────────────────────────────────
@@ -515,6 +588,14 @@ namespace EnvReporter
             });
         }
 
+        // ── Env helper: set debugEnv only if the name is registered, fall back to vanilla ──
+        internal static void SetDebugEnvSafe(string name, string vanillaFallback = "")
+        {
+            if (EnvMan.instance == null) return;
+            bool exists = EnvMan.instance.m_environments?.Exists(e => e.m_name == name) ?? false;
+            EnvMan.instance.m_debugEnv = exists ? name : vanillaFallback;
+        }
+
         // ── Seek logic (shared by command + food trigger) ───────────────────
 
         internal static void ActivateSeek(Terminal? ctx = null, string message = "The wind stirs.")
@@ -555,7 +636,7 @@ namespace EnvReporter
                 Log.LogWarning("[EnvR] GuidingWindSE is null — ObjectDB patch may not have run");
 
             SeekEnvExpiry = Time.time + SeekEnvDuration;
-            if (EnvMan.instance != null) EnvMan.instance.m_debugEnv = "LastLight";
+            BroadcastEnv("LastLight", "Twilight_Clear");
 
             if (ctx != null)
             {
@@ -613,7 +694,37 @@ namespace EnvReporter
         static readonly string[] TraderLocations = {
             "Vendor_BlackForest", // Haldor
             "Hildir_camp",        // Hildir
+            "BogWitch_Camp",      // Bog Witch
         };
+
+        const string TraderMetPrefix = "pilgrim_met_";
+
+        internal static bool HasMetTrader(string locationName)
+        {
+            var key = TraderMetPrefix + locationName;
+            return Player.m_localPlayer?.m_customData.ContainsKey(key) == true;
+        }
+
+        internal static void MarkTraderMet(Vector3 traderPos)
+        {
+            var player = Player.m_localPlayer;
+            if (player == null) return;
+            // Find which of our known trader zones is closest to this NPC position
+            string bestLoc = "";
+            float bestDist = float.MaxValue;
+            foreach (var loc in TraderLocations)
+            {
+                if (!FindClosestLocation(loc, traderPos, out Vector3 zonePos)) continue;
+                float d = Vector3.Distance(traderPos, zonePos);
+                if (d < bestDist) { bestDist = d; bestLoc = loc; }
+            }
+            if (bestLoc != "" && bestDist < 500f)
+            {
+                player.m_customData[TraderMetPrefix + bestLoc] = "1";
+                Log.LogInfo($"[Trader] Marked met: {bestLoc} (dist={bestDist:F0}m)");
+            }
+            else Log.LogWarning($"[Trader] MarkTraderMet called but no match: pos={traderPos} bestLoc='{bestLoc}' bestDist={bestDist:F0}m");
+        }
 
         static System.Reflection.MethodInfo? _isExploredMethod;
         static bool IsUnexplored(Vector3 pos)
@@ -631,14 +742,30 @@ namespace EnvReporter
             bestPos = Vector3.zero; bestName = ""; bestDist = float.MaxValue;
             foreach (var loc in locationNames)
             {
-                // Find all instances, not just the closest, so we can skip explored ones
-                // ZoneSystem only exposes FindClosestLocation so we check unexplored on the result
                 if (!FindClosestLocation(loc, from, out Vector3 pos)) continue;
                 if (!IsUnexplored(pos)) continue;
                 float d = Vector3.Distance(from, pos);
                 if (d < bestDist) { bestDist = d; bestPos = pos; bestName = loc; }
             }
             return bestDist < float.MaxValue;
+        }
+
+        static List<Minimap.PinData>? GetAllPins()
+        {
+            if (Minimap.instance == null) return null;
+            var f = typeof(Minimap).GetField("m_pins",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+            return f?.GetValue(Minimap.instance) as List<Minimap.PinData>;
+        }
+
+        static bool HasPinNamed(string name)
+        {
+            var pins = GetAllPins();
+            if (pins == null) return false;
+            foreach (var pin in pins)
+                if (pin.m_save && string.Equals(pin.m_name, name, System.StringComparison.OrdinalIgnoreCase))
+                    return true;
+            return false;
         }
 
         internal static void ActivateDungeonSeek(Player player, string trophyPrefab, string message = "The veil parts — something stirs nearby.")
@@ -651,7 +778,7 @@ namespace EnvReporter
 
             SeekOverrideTarget = bestPos;
             DungeonEnvExpiry = Time.time + DungeonEnvDuration;
-            if (EnvMan.instance != null) EnvMan.instance.m_debugEnv = "VoidWhisper";
+            BroadcastEnv("VoidWhisper", "ThunderStorm");
 
             var seTemplate = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == "SE_GuidingWind") ?? GuidingWindSE;
             if (seTemplate != null) player.GetSEMan().AddStatusEffect(seTemplate, true);
@@ -662,21 +789,34 @@ namespace EnvReporter
 
         internal static void ActivateTraderSeek(Player player)
         {
-            if (!FindNearestUnexplored(TraderLocations, player.transform.position, out Vector3 bestPos, out string bestName, out float bestDist))
+            // For traders, "discovered" = minimap pin with the trader's name exists.
+            // Don't use IsUnexplored — the zone center may be far from where the trader
+            // actually wandered, so map exploration around the zone center is unreliable.
+            var bestPos = Vector3.zero;
+            var bestName = "";
+            float bestDist = float.MaxValue;
+
+            float bestUnknownDist = float.MaxValue, bestKnownDist = float.MaxValue;
+            Vector3 bestUnknownPos = Vector3.zero, bestKnownPos = Vector3.zero;
+            string bestUnknownName = "", bestKnownName = "";
+
+            foreach (var loc in TraderLocations)
             {
-                // Fall back to any trader (explored or not) if all are known
-                bestDist = float.MaxValue;
-                foreach (var loc in TraderLocations)
-                {
-                    if (!FindClosestLocation(loc, player.transform.position, out Vector3 pos)) continue;
-                    float d = Vector3.Distance(player.transform.position, pos);
-                    if (d < bestDist) { bestDist = d; bestPos = pos; bestName = loc; }
-                }
-                if (bestDist == float.MaxValue)
-                {
-                    player.Message(MessageHud.MessageType.Center, "The merchants are beyond reach.");
-                    return;
-                }
+                if (!FindClosestLocation(loc, player.transform.position, out Vector3 pos)) continue;
+                float d = Vector3.Distance(player.transform.position, pos);
+                if (!HasMetTrader(loc)) { if (d < bestUnknownDist) { bestUnknownDist = d; bestUnknownPos = pos; bestUnknownName = loc; } }
+                else                    { if (d < bestKnownDist)   { bestKnownDist = d;   bestKnownPos = pos;   bestKnownName = loc; } }
+            }
+
+            // Prefer nearest unmet; if all met fall back to nearest trader regardless of distance
+            bestPos  = bestUnknownName != "" ? bestUnknownPos  : bestKnownPos;
+            bestName = bestUnknownName != "" ? bestUnknownName : bestKnownName;
+            bestDist = bestUnknownName != "" ? bestUnknownDist : bestKnownDist;
+
+            if (bestDist == float.MaxValue)
+            {
+                player.Message(MessageHud.MessageType.Center, "The merchants are beyond reach.");
+                return;
             }
 
             player.Message(MessageHud.MessageType.Center, Cfg.Rituals.Items.GetValueOrDefault("seek_trader")?.Message ?? "Gold calls to gold...");
@@ -685,7 +825,7 @@ namespace EnvReporter
             var dir = (bestPos - player.transform.position);
             dir.y = 0f;
             if (dir != Vector3.zero && Scheduler != null)
-                Scheduler.SendBird(dir.normalized);
+                BroadcastBird(dir.normalized);
         }
 
         // ── Kindle ritual ───────────────────────────────────────────────────
@@ -727,7 +867,7 @@ namespace EnvReporter
             var dir = nearest.transform.position - player.transform.position;
             dir.y = 0f;
             if (dir != Vector3.zero && Scheduler != null)
-                Scheduler.SendBird(dir.normalized);
+                BroadcastBird(dir.normalized);
 
             player.Message(MessageHud.MessageType.Center, "Find fellowship.");
             Log.LogInfo($"[EnvR] Player seek: {nearest.GetPlayerName()} at {bestDist:F0}m");
@@ -759,7 +899,7 @@ namespace EnvReporter
 
             SeekOverrideTarget = spawnPos;
             HomeEnvExpiry = Time.time + HomeEnvDuration;
-            if (EnvMan.instance != null) EnvMan.instance.m_debugEnv = "DreamWalk";
+            BroadcastEnv("DreamWalk", "Meadows_Clouds");
 
             var seTemplate = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == "SE_GuidingWind")
                              ?? GuidingWindSE;
@@ -804,8 +944,11 @@ namespace EnvReporter
         {
             ClearSkiesExpiry = Time.time + ClearSkiesDuration;
             if (EnvMan.instance != null) EnvMan.instance.m_debugEnv = "Clear";
+            // Set wind blowing in the direction the player is facing
+            float windAngle = player.transform.eulerAngles.y;
+            EnvMan.instance?.SetDebugWind(windAngle, 0.8f);
             player.Message(MessageHud.MessageType.Center, message);
-            Log.LogInfo($"[Pilgrim] Clear skies active for {ClearSkiesDuration}s");
+            Log.LogInfo($"[Pilgrim] Clear skies active for {ClearSkiesDuration}s, wind angle {windAngle:F0}°");
         }
 
         // ── Water walk ritual ───────────────────────────────────────────────
@@ -848,7 +991,7 @@ namespace EnvReporter
                 unarmed.m_attack.m_attackOffset = _origAttackOffset * GiantScale;
             }
             VdsSwimSuppressor.Suppress();
-            if (EnvMan.instance != null) EnvMan.instance.m_debugEnv = "GoldenAscent";
+            BroadcastEnv("GoldenAscent", "Twilight_Clear");
             player.Message(MessageHud.MessageType.Center, message);
         }
 
@@ -912,6 +1055,12 @@ namespace EnvReporter
             var rf2 = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
             var currentRight = typeof(Humanoid).GetField("m_rightItem", rf2)?.GetValue(player) as ItemDrop.ItemData;
 
+            if (currentRight?.m_shared?.m_skillType != Skills.SkillType.Swords)
+            {
+                player.Message(MessageHud.MessageType.Center, "You must hold a sword to summon Dyrnwyn.");
+                return;
+            }
+
             // Pull the held weapon out of the inventory list (kept by reference) to free its slot
             if (currentRight != null)
             {
@@ -941,16 +1090,12 @@ namespace EnvReporter
             TryPlayEmote(player, "cheer");
 
             // One-shot lightning strike on the sword (right-hand attach point), delayed to land on the cheer's peak
+            Transform? handPtCapture = player.transform.Find("Visual/Armature/Hips/Spine/Spine1/Spine2/RightShoulder/RightArm/RightForeArm/RightHand/RightHandMiddle1")
+                                    ?? player.transform;
+            Vector3 strikeCapture = handPtCapture.position + Vector3.up * 0.5f + player.transform.forward * 0.5f;
             Scheduler?.RunDelayed(0.5f, () =>
             {
-                var scene = ZNetScene.instance;
-                var lightningPrefab = scene?.GetPrefab("fx_chainlightning_hit");
-                if (lightningPrefab == null) return;
-                Transform? handPt = player.transform.Find("Visual/Armature/Hips/Spine/Spine1/Spine2/RightShoulder/RightArm/RightForeArm/RightHand/RightHandMiddle1")
-                                 ?? player.transform;
-                Vector3 strikePos = handPt.position + Vector3.up * 0.5f + player.transform.forward * 0.5f;
-                var lvfx = Object.Instantiate(lightningPrefab, strikePos, Quaternion.identity);
-                Object.Destroy(lvfx, 4f);
+                BroadcastVfx(strikeCapture, "fx_chainlightning_hit", 4f);
                 Log.LogInfo("[Pilgrim] FlamingSword VFX: fx_chainlightning_hit");
             });
 
@@ -975,9 +1120,7 @@ namespace EnvReporter
         {
             FlamingSwordExpiry = 0f;
 
-            var novaPrefab = ZNetScene.instance?.GetPrefab("fx_fireskeleton_nova");
-            if (novaPrefab != null)
-                Object.Instantiate(novaPrefab, player.transform.position, Quaternion.identity);
+            BroadcastVfx(player.transform.position, "fx_fireskeleton_nova", 0f);
 
             if (immediate)
                 FinishSwordSwapBack(player);
@@ -1006,12 +1149,9 @@ namespace EnvReporter
 
         static void SpawnSmokePuff(Player player)
         {
-            var smokePrefab = ZNetScene.instance?.GetPrefab("vfx_Smoked");
-            if (smokePrefab == null) return;
             Transform? handPt = player.transform.Find("Visual/Armature/Hips/Spine/Spine1/Spine2/RightShoulder/RightArm/RightForeArm/RightHand/RightHandMiddle1")
                              ?? player.transform;
-            var svfx = Object.Instantiate(smokePrefab, handPt.position, Quaternion.identity);
-            Object.Destroy(svfx, 3f);
+            BroadcastVfx(handPt.position, "vfx_Smoked", 3f);
         }
 
         // ── Trophy shrine logic ─────────────────────────────────────────────
@@ -1037,43 +1177,21 @@ namespace EnvReporter
 
         internal static void SpawnRitualVFX(Vector3 firePos, Vector3 playerPos)
         {
-            var scene = ZNetScene.instance;
-            if (scene == null) return;
-
-            // Battering ram fire — oriented away from player
-            var ramPrefab = scene.GetPrefab("fx_batteringram_fire");
-            if (ramPrefab != null)
-            {
-                var awayDir = (firePos - playerPos);
-                awayDir.y = 0f;
-                if (awayDir == Vector3.zero) awayDir = Vector3.forward;
-                var go = UnityEngine.Object.Instantiate(ramPrefab, firePos, Quaternion.LookRotation(awayDir.normalized));
-                UnityEngine.Object.Destroy(go, 4f);
-            }
-
-            // Nova burst at the fire
-            var novaPrefab = scene.GetPrefab("fx_fireskeleton_nova");
-            if (novaPrefab != null)
-                UnityEngine.Object.Instantiate(novaPrefab, firePos, Quaternion.identity);
-
-            // Lightning strike from the gods — on the campfire (disabled for now, revisit)
-            // var lightningPrefab = scene.GetPrefab("fx_chainlightning_hit");
-            // if (lightningPrefab != null)
-            //     UnityEngine.Object.Instantiate(lightningPrefab, firePos, Quaternion.identity);
+            var awayDir = firePos - playerPos;
+            awayDir.y = 0f;
+            if (awayDir == Vector3.zero) awayDir = Vector3.forward;
+            BroadcastVfx(firePos, "fx_batteringram_fire", 4f, Quaternion.LookRotation(awayDir.normalized));
+            BroadcastVfx(firePos, "fx_fireskeleton_nova", 0f);
         }
 
         static void SpawnTrophyVFX(UnityEngine.Vector3 pos)
         {
-            var scene = ZNetScene.instance;
-            if (scene == null) return;
-            // Primary VFX from config, fallback candidates if not found
             string[] candidates = { Plugin.Cfg.Trophies.Vfx, "vfx_guardianpower_activate", "vfx_offering", "vfx_lootspawn" };
             foreach (var name in candidates)
             {
-                var prefab = scene.GetPrefab(name);
-                if (prefab != null)
+                if (ZNetScene.instance?.GetPrefab(name) != null)
                 {
-                    UnityEngine.Object.Instantiate(prefab, pos, UnityEngine.Quaternion.identity);
+                    BroadcastVfx(pos, name, 0f);
                     Plugin.Log.LogInfo($"[Pilgrim] Trophy VFX: {name}");
                     return;
                 }
@@ -1330,9 +1448,17 @@ namespace EnvReporter
             string cdStr = Plugin.RitualCooldownRemaining > 0f
                 ? $" <color=red>({Plugin.RitualCooldownRemaining:F0}s)</color>" : "";
             string countStr = $" <color={(knownKeys.Count < allKeys.Count ? "yellow" : "green")}>{knownKeys.Count}/{allKeys.Count}</color>";
-            __result += $"\n<size=14><color=orange>── Offerings{countStr}{cdStr} ──</color>";
-            __result += rows.ToString();
-            __result += "</size>";
+
+            if (Plugin.ShowHintsEnabled)
+            {
+                __result += $"\n<size=14><color=orange>── Offerings{countStr}{cdStr} ──</color>";
+                __result += rows.ToString();
+                __result += $"\n<color=grey>[H] Hide</color></size>";
+            }
+            else
+            {
+                __result += $"\n<size=14><color=grey>── Offerings{countStr}{cdStr}\n[H] Show</color></size>";
+            }
         }
     }
 
@@ -1461,12 +1587,17 @@ namespace EnvReporter
             }
             if (prefab == Plugin.GiantFood)
             {
-                Plugin.Log.LogInfo($"[Pilgrim] YmirRemains at campfire: RitualEnabled={RitualEnabled("giant")} known={Plugin.IsRitualKnown(__instance, "giant")} hasKey={ritualItems.ContainsKey("giant")}");
                 if (RitualEnabled("giant"))
                 { Consume(); Plugin.ActivateGiant(__instance, RitualMsg("giant", "The mountain answers. You are vast.")); return false; }
             }
             if (prefab == Plugin.FlamingSwordFood && RitualEnabled("flaming_sword"))
-            { Consume(); Plugin.ActivateFlamingSword(__instance, RitualMsg("flaming_sword", "Dyrnwyn answers. Let it burn.")); return false; }
+            {
+                var rf3 = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+                var held = typeof(Humanoid).GetField("m_rightItem", rf3)?.GetValue(__instance) as ItemDrop.ItemData;
+                if (held?.m_shared?.m_skillType != Skills.SkillType.Swords)
+                { __instance.Message(MessageHud.MessageType.Center, "You must hold a sword to summon Dyrnwyn."); return false; }
+                Consume(); Plugin.ActivateFlamingSword(__instance, RitualMsg("flaming_sword", "Dyrnwyn answers. Let it burn.")); return false;
+            }
 
             // Catch-all: suppress vanilla for any ritual item so we never see game rejection messages
             foreach (var (match, isPrefix, key, _) in Plugin.RitualItemMap)
@@ -1633,7 +1764,7 @@ namespace EnvReporter
             {
                 // Dungeon seek mode — track the stored position
                 target = Plugin.SeekOverrideTarget.Value;
-                EnvMan.instance.m_debugEnv = "VoidWhisper";
+                Plugin.BroadcastEnv("VoidWhisper", "ThunderStorm");
             }
             else
             {
@@ -1641,7 +1772,7 @@ namespace EnvReporter
                 var (_, prefab) = Plugin.GetNextBoss();
                 if (prefab == null) return;
                 if (!Plugin.FindClosestLocation(prefab, player.transform.position, out target)) return;
-                EnvMan.instance.m_debugEnv = "LastLight";
+                Plugin.BroadcastEnv("LastLight", "Twilight_Clear");
             }
 
             Vector3 pos = player.transform.position;
@@ -1883,6 +2014,7 @@ namespace EnvReporter
             if (!Plugin.Cfg.Carts.Enabled) return;
             var nview = __instance.GetComponent<ZNetView>();
             int level = nview?.GetZDO()?.GetInt("ath_cart_level") ?? 0;
+            __result = __result.Replace("Cart", level == 0 ? "Cart" : $"Cart - Tier {level}");
             int slots = CartUpgrade.BaseWidth * CartUpgrade.Heights[Mathf.Clamp(level, 0, CartUpgrade.Heights.Length - 1)];
 
             if (level >= CartUpgrade.Heights.Length - 1)
@@ -1895,7 +2027,7 @@ namespace EnvReporter
             var cost = CartUpgrade.Costs[level];
             __result += $"\n[<color=yellow>Shift+E</color>] Reinforce cart";
             foreach (var (item, amount) in cost)
-                __result += $"\n  {amount}x {item}";
+                __result += $"\n  {amount}x {CartUpgrade.DisplayName(item)}";
             __result += $"\n[<color=yellow>G</color>] Release cart";
         }
     }
@@ -1919,7 +2051,212 @@ namespace EnvReporter
         }
     }
 
+    // ── Water walk: keep attached cart at water surface ─────────────────────
+
+    [HarmonyPatch(typeof(Vagon), "FixedUpdate")]
+    static class VagonFixedUpdatePatch
+    {
+        static readonly BindingFlags RF = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        internal static readonly Dictionary<ZDOID, Minimap.PinData> _cartPins = new();
+        static float _pinUpdateTimer = 0f;
+
+        static System.Reflection.MethodInfo? _addPinMethod;
+
+        internal static void EnsurePin(Vagon vagon)
+        {
+            if (Minimap.instance == null) return;
+            var nview = vagon.GetComponent<ZNetView>();
+            if (nview == null || !nview.IsValid()) return;
+            var uid = nview.GetZDO()!.m_uid;
+            int level = nview.GetZDO()!.GetInt("ath_cart_level");
+            string label = level > 0 ? $"Cart - Tier {level}" : "Cart";
+            bool attached = vagon.IsAttached(Player.m_localPlayer);
+
+            if (_cartPins.TryGetValue(uid, out var existing) && existing != null)
+            {
+                if (attached)
+                {
+                    // Remove pin while towing; it will be re-added when detached
+                    Minimap.instance.RemovePin(existing);
+                    _cartPins.Remove(uid);
+                    return;
+                }
+                existing.m_pos = vagon.transform.position;
+                existing.m_name = label;
+                return;
+            }
+
+            if (attached) return; // don't pin while towing
+
+            // Remove stale saved pin with same label from a prior session
+            var pinsField = typeof(Minimap).GetField("m_pins", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (pinsField?.GetValue(Minimap.instance) is List<Minimap.PinData> pins)
+            {
+                var stale = pins.Find(p => p.m_name == label && p.m_save);
+                if (stale != null) Minimap.instance.RemovePin(stale);
+            }
+
+            _addPinMethod ??= typeof(Minimap).GetMethod("AddPin",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (_addPinMethod == null) return;
+            var paramDefs = _addPinMethod.GetParameters();
+            var args = new object[paramDefs.Length];
+            args[0] = vagon.transform.position;
+            args[1] = (Minimap.PinType)0;  // Icon0 = fire/campfire
+            args[2] = label;
+            args[3] = true;
+            args[4] = false;
+            for (int i = 5; i < args.Length; i++)
+                args[i] = paramDefs[i].DefaultValue ?? System.Activator.CreateInstance(paramDefs[i].ParameterType);
+            var pin = _addPinMethod.Invoke(Minimap.instance, args) as Minimap.PinData;
+            if (pin != null) _cartPins[uid] = pin;
+        }
+
+        static void Postfix(Vagon __instance)
+        {
+            // Minimap pin — update every 2s to avoid per-frame overhead
+            _pinUpdateTimer -= Time.fixedDeltaTime;
+            if (_pinUpdateTimer > 0f) return;
+            _pinUpdateTimer = 2f;
+            EnsurePin(__instance);
+        }
+    }
+
+    // ── Container window auto-resize ────────────────────────────────────────
+
+    [HarmonyPatch(typeof(InventoryGui), "UpdateContainer")]
+    static class ContainerWindowResizePatch
+    {
+        static readonly BindingFlags RF = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        static int _lastRows = -1;
+        static float _defaultH = 0f;
+        // Original positions of center-anchored children that live near the panel top
+        static readonly string[] _topCenterChildren = { "TakeAll", "StackAll", "createGroupBtn", "sunken", "ContainerScroll" };
+        static readonly Dictionary<string, Vector2> _origPos  = new();
+        static readonly Dictionary<string, Vector2> _origSize = new();
+
+        static void Postfix(InventoryGui __instance)
+        {
+            try
+            {
+                var currentContainer = typeof(InventoryGui).GetField("m_currentContainer", RF)?.GetValue(__instance) as Container;
+                if (currentContainer == null) return;
+                bool isVagon = currentContainer.GetComponentInParent<Vagon>() != null;
+                bool isShip = false;
+                if (!isVagon)
+                {
+                    var ship = currentContainer.GetComponentInParent<Ship>();
+                    if (ship != null)
+                    {
+                        string sn = ship.gameObject.name.ToLower().Replace("(clone)", "").Trim();
+                        isShip = ShipStoragePatch.ShipLevels.ContainsKey(sn);
+                    }
+                }
+                if (!isVagon && !isShip) return;
+
+                int rows = currentContainer.GetInventory()?.GetHeight() ?? 3;
+                if (rows == _lastRows) return;
+                _lastRows = rows;
+
+                var containerGrid = typeof(InventoryGui).GetField("m_containerGrid", RF)?.GetValue(__instance) as InventoryGrid;
+                float cellH = 64f;
+                var espaceField = typeof(InventoryGrid).GetField("m_elementSpace", RF);
+                if (espaceField?.GetValue(containerGrid) is Vector2 es) cellH = es.y;
+
+                RectTransform? panelRt = null;
+                var containerFieldVal = typeof(InventoryGui).GetField("m_container", RF)?.GetValue(__instance);
+                if (containerFieldVal is RectTransform rt2) panelRt = rt2;
+                else if (containerFieldVal is GameObject go) panelRt = go.GetComponent<RectTransform>();
+                if (panelRt == null) return;
+
+                // Record original positions once (from first open, before any resize)
+                if (_defaultH == 0f)
+                {
+                    _defaultH = panelRt.sizeDelta.y;
+                    for (int i = 0; i < panelRt.childCount; i++)
+                    {
+                        var ch = panelRt.GetChild(i) as RectTransform;
+                        if (ch != null && System.Array.IndexOf(_topCenterChildren, ch.name) >= 0)
+                        {
+                            _origPos[ch.name]  = ch.anchoredPosition;
+                            _origSize[ch.name] = ch.sizeDelta;
+                        }
+                    }
+                }
+
+                float newH = rows * cellH + 110f;
+                panelRt.sizeDelta = new Vector2(panelRt.sizeDelta.x, newH);
+
+                // Shift center-anchored top elements so they stay at their original
+                // distance from the panel top as the panel grows downward.
+                float delta = (newH - _defaultH) / 2f;
+                for (int i = 0; i < panelRt.childCount; i++)
+                {
+                    var ch = panelRt.GetChild(i) as RectTransform;
+                    if (ch == null || !_origPos.TryGetValue(ch.name, out var orig)) continue;
+                    ch.anchoredPosition = new Vector2(orig.x, orig.y + delta);
+                    // Also stretch ContainerScroll height to match the new grid height
+                    if (ch.name == "ContainerScroll" && _origSize.TryGetValue(ch.name, out var os))
+                        ch.sizeDelta = new Vector2(os.x, os.y + delta * 2f);
+                }
+            }
+            catch (System.Exception ex) { Plugin.Log.LogWarning($"[Resize] {ex.Message}"); }
+        }
+
+        internal static void Reset() { _lastRows = -1; }
+    }
+
+    [HarmonyPatch(typeof(InventoryGui), "Hide")]
+    static class ContainerGuiHidePatch
+    {
+        static void Postfix() => ContainerWindowResizePatch.Reset();
+    }
+
     // ── Cart: upgradeable inventory ──────────────────────────────────────────
+
+    // Container.Awake loads inventory with default height (3). We must resize and reload
+    // BEFORE items are considered "loaded" so items at y>=3 aren't dropped.
+    [HarmonyPatch(typeof(Container), "Awake")]
+    static class ContainerAwakePatch
+    {
+        static void Postfix(Container __instance)
+        {
+            if (!Plugin.Cfg.Carts.Enabled) return;
+            var vagon = __instance.GetComponentInParent<Vagon>();
+            if (vagon == null) return;
+            var nview = __instance.GetComponentInParent<ZNetView>();
+            if (nview == null || !nview.IsValid()) return;
+            var zdo = nview.GetZDO();
+            if (zdo == null) return;
+            int level = zdo.GetInt("ath_cart_level");
+            if (level <= 0) return;
+            var inv = __instance.GetInventory();
+            if (inv == null) return;
+            CartUpgrade.ResizeInventory(inv, level);
+            // Reload items from ZDO — the first load used height=3 and dropped items at y>=3
+            var bytes = zdo.GetByteArray("items");
+            if (bytes != null && bytes.Length > 0)
+            {
+                var pkg = new ZPackage(bytes);
+                inv.Load(pkg);
+                Plugin.Log.LogWarning($"[Cart] ContainerAwake: reloaded items at tier {level}");
+            }
+            InventorySavePatch.CartLevels[inv] = level;
+        }
+    }
+
+    [HarmonyPatch(typeof(Inventory), "Save")]
+    static class InventorySavePatch
+    {
+        internal static readonly Dictionary<Inventory, int> CartLevels = new();
+
+        static void Prefix(Inventory __instance)
+        {
+            if (!CartLevels.TryGetValue(__instance, out int level)) return;
+            CartUpgrade.ResizeInventory(__instance, level);
+            Plugin.Log.LogWarning($"[Cart] Inventory.Save prefix: ensured height for tier {level}");
+        }
+    }
 
     [HarmonyPatch(typeof(Vagon), "Awake")]
     class VagonAwakePatch
@@ -1938,6 +2275,50 @@ namespace EnvReporter
             int level = nview.GetZDO()?.GetInt("ath_cart_level") ?? 0;
             if (level > 0) CartUpgrade.ApplySize(vagon, level);
             CartUpgrade.ApplyTint(vagon, level);
+            // Register inventory so Inventory.Save patch can ensure correct height
+            var rf2 = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+            var cont = typeof(Vagon).GetField("m_container", rf2)?.GetValue(vagon) as Container;
+            var inv = cont?.GetInventory();
+            if (inv != null) InventorySavePatch.CartLevels[inv] = level;
+            if (level > 0) Plugin.Log.LogWarning($"[Cart] Registered cart inventory tier={level}");
+            VagonFixedUpdatePatch.EnsurePin(vagon);
+        }
+    }
+
+    // ── Ship storage expansion ───────────────────────────────────────────────
+
+    [HarmonyPatch(typeof(Container), "Awake")]
+    static class ShipStoragePatch
+    {
+        // karve: 6×6 (tier-3 cart), vikingship: 6×6 (doubles default 6×3)
+        internal static readonly Dictionary<string, int> ShipLevels = new()
+        {
+            { "karve",      3 },
+            { "vikingship", 3 },
+        };
+
+        static void Postfix(Container __instance)
+        {
+            if (!Plugin.Cfg.Carts.Enabled) return;
+            var ship = __instance.GetComponentInParent<Ship>();
+            if (ship == null) return;
+            string rawName = ship.gameObject.name.ToLower().Replace("(clone)", "").Trim();
+            if (!ShipLevels.TryGetValue(rawName, out int level)) return;
+            __instance.StartCoroutine(RestoreAfterLoad(__instance, level));
+        }
+
+        static System.Collections.IEnumerator RestoreAfterLoad(Container container, int level)
+        {
+            yield return null; // wait one frame for ZDO sync
+            var nview = container.GetComponentInParent<ZNetView>();
+            if (nview == null || !nview.IsValid()) yield break;
+            var inv = container.GetInventory();
+            if (inv == null) yield break;
+            CartUpgrade.ResizeInventory(inv, level);
+            InventorySavePatch.CartLevels[inv] = level;
+            var bytes = nview.GetZDO()?.GetByteArray("items");
+            if (bytes != null && bytes.Length > 0)
+                inv.Load(new ZPackage(bytes));
         }
     }
 
@@ -1953,7 +2334,14 @@ namespace EnvReporter
             __instance.m_onDestroyed += () =>
             {
                 var nview = __instance.GetComponent<ZNetView>();
-                if (nview == null || !nview.IsValid() || !nview.IsOwner()) return;
+                if (nview == null || !nview.IsValid()) return;
+                var uid = nview.GetZDO()!.m_uid;
+                if (VagonFixedUpdatePatch._cartPins.TryGetValue(uid, out var pin) && pin != null)
+                {
+                    Minimap.instance?.RemovePin(pin);
+                    VagonFixedUpdatePatch._cartPins.Remove(uid);
+                }
+                if (!nview.IsOwner()) return;
                 int level = nview.GetZDO()?.GetInt("ath_cart_level") ?? 0;
                 if (level <= 0) return;
                 var scene = ZNetScene.instance;
@@ -1966,32 +2354,73 @@ namespace EnvReporter
                         var prefab = scene.GetPrefab(itemName);
                         if (prefab == null) continue;
                         for (int n = 0; n < amount; n++)
-                            UnityEngine.Object.Instantiate(prefab, pos + UnityEngine.Random.insideUnitSphere * 0.5f, UnityEngine.Quaternion.identity);
+                            scene.SpawnObject(pos + UnityEngine.Random.insideUnitSphere * 0.5f, UnityEngine.Quaternion.identity, prefab);
                     }
                 }
             };
+
         }
     }
 
     // ── Harmony: ritual discovery on first-time item pickup ──────────────────
 
     [HarmonyPatch(typeof(Player), "AddKnownItem")]
+    [HarmonyPatch(typeof(Game), "Start")]
+    [HarmonyPatch(typeof(StoreGui), nameof(StoreGui.Show))]
+    static class TraderInteractPatch
+    {
+        static void Postfix(Trader trader)
+        {
+            if (trader == null) return;
+            Plugin.MarkTraderMet(trader.transform.position);
+        }
+    }
+
+    static class GameStartRpcPatch
+    {
+        static void Postfix()
+        {
+            ZRoutedRpc.instance.Register<Vector3, float>("Pilgrim_SendBird", (_, dir, speed) =>
+                Plugin.Scheduler?.SendBird(dir, speed));
+
+            ZRoutedRpc.instance.Register<Vector3, Quaternion, string, float>("Pilgrim_SpawnVfx", (_, pos, rot, prefabName, destroyDelay) =>
+            {
+                var prefab = ZNetScene.instance?.GetPrefab(prefabName);
+                if (prefab == null) return;
+                Plugin.SpawnVfxLocal(prefab, pos, rot, destroyDelay);
+            });
+
+            ZRoutedRpc.instance.Register<string, string>("Pilgrim_SetEnv", (_, envName, fallback) =>
+                Plugin.SetDebugEnvSafe(envName, fallback));
+        }
+    }
+
+    [HarmonyPatch(typeof(Character), nameof(Character.ShowPickupMessage))]
     class RitualDiscoveryPatch
     {
-        static void Postfix(Player __instance, ItemDrop.ItemData item)
+        static void Postfix(Character __instance, ItemDrop.ItemData item)
         {
-            if (__instance != Player.m_localPlayer) return;
+            var player = __instance as Player;
+            if (player == null || player != Player.m_localPlayer) return;
             if (!Plugin.Cfg.Rituals.Enabled) return;
             string prefab = item.m_dropPrefab?.name ?? "";
             if (string.IsNullOrEmpty(prefab)) return;
+
+            // Auto-grant Eikthyr power on first trophy pickup — no item stand available yet in early game
+            if (prefab == "TrophyEikthyr" && string.IsNullOrEmpty(player.GetGuardianPowerName()))
+            {
+                player.SetGuardianPower("GP_Eikthyr");
+                player.Message(MessageHud.MessageType.Center, "Eikthyr's power is yours.");
+                Plugin.Log.LogInfo("[Pilgrim] Auto-granted GP_Eikthyr on TrophyEikthyr pickup.");
+            }
 
             foreach (var (match, isPrefix, key, display) in Plugin.RitualItemMap)
             {
                 bool matches = isPrefix ? prefab.StartsWith(match) : prefab == match;
                 if (!matches) continue;
                 if (!Plugin.Cfg.Rituals.Items.TryGetValue(key, out var r) || !r.Enabled) continue;
-                if (Plugin.IsRitualKnown(__instance, key)) continue;
-                Plugin.LearnRitual(__instance, key, display);
+                if (Plugin.IsRitualKnown(player, key)) continue;
+                Plugin.LearnRitual(player, key, display);
             }
         }
     }
@@ -2025,6 +2454,52 @@ namespace EnvReporter
         }
     }
 
+    [HarmonyPatch(typeof(Player), "Update")]
+    static class PlayerHintsTogglePatch
+    {
+        static readonly string[] CampfirePrefabs = { "fire_pit", "fire_pit_iron", "hearth" };
+
+        static void Postfix(Player __instance)
+        {
+            if (__instance != Player.m_localPlayer) return;
+            if (!Input.GetKeyDown(KeyCode.H)) return;
+            if (!Plugin.Cfg.Rituals.Enabled) return;
+
+            var hoverObj = __instance.GetHoverObject();
+            if (hoverObj == null) return;
+            var fp = hoverObj.GetComponentInParent<Fireplace>();
+            if (fp == null || !fp.IsBurning()) return;
+            string goName = fp.gameObject.name.ToLower().Replace("(clone)", "").Trim();
+            if (!System.Array.Exists(CampfirePrefabs, p => goName.StartsWith(p))) return;
+
+            Plugin.ShowHintsEnabled = !Plugin.ShowHintsEnabled;
+            __instance.Message(MessageHud.MessageType.TopLeft,
+                Plugin.ShowHintsEnabled ? "Offerings shown." : "Offerings hidden.");
+        }
+    }
+
+    [HarmonyPatch(typeof(MessageHud), nameof(MessageHud.ShowMessage))]
+    static class MessageHudTimerPatch
+    {
+        internal static bool ExtendNextCenter = false;
+
+        static void Postfix(MessageHud __instance, MessageHud.MessageType type)
+        {
+            if (!ExtendNextCenter) return;
+            if (type != MessageHud.MessageType.Center) return;
+            ExtendNextCenter = false;
+            // Center messages use _crossFadeTextBuffer: two entries (fade-in at time=0, fade-out at time=4).
+            // Extend the fade-out duration so the ritual discovery message stays readable longer.
+            var bf = BindingFlags.Instance | BindingFlags.NonPublic;
+            var bufField = typeof(MessageHud).GetField("_crossFadeTextBuffer", bf);
+            if (bufField?.GetValue(__instance) is System.Collections.IList buf && buf.Count > 0)
+            {
+                var last = buf[buf.Count - 1];
+                last?.GetType().GetField("time")?.SetValue(last, 8f);
+            }
+        }
+    }
+
     static class ItemUtil
     {
         public static int CountByPrefab(Inventory inv, string prefab) =>
@@ -2045,24 +2520,49 @@ namespace EnvReporter
 
     static class CartUpgrade
     {
-        // Each level adds one row (6 columns wide)
-        public const int BaseWidth = 6;
-        public static readonly int[] Heights = { 3, 4, 5, 6, 7 }; // levels 0-4 = base, +1, +2, +3, +4 rows
-
-        internal static readonly (string item, int amount)[][] Costs = {
-            new[] { ("FineWood",   10), ("BronzeNails", 20) },  // → level 1
-            new[] { ("ElderBark",  10), ("IronNails",   20) },  // → level 2
-            new[] { ("Silver",      5), ("WolfPelt",     5) },  // → level 3
-            new[] { ("BlackMetal",  5), ("LoxPelt",      3) },  // → level 4
+        internal static string DisplayName(string prefab) => prefab switch {
+            "RoundLog"     => "Core Wood",
+            "BronzeNails"  => "Bronze Nails",
+            "IronNails"    => "Iron Nails",
+            "FineWood"     => "Fine Wood",
+            "ElderBark"    => "Elder Bark",
+            "LinenThread"  => "Linen Thread",
+            "BlackMetal"   => "Black Metal",
+            "YggdrasilWood"=> "Yggdrasil Wood",
+            "AshWood"      => "Ash Wood",
+            _              => prefab,
         };
 
-        // Subtle level tints: natural wood → bronze warmth → iron grey → silver shimmer → dark metal
+        // Each level adds one row (6 columns wide)
+        public const int BaseWidth = 6;
+        public static readonly int[] Heights = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 }; // levels 0-10
+
+        internal static readonly (string item, int amount)[][] Costs = {
+            new[] { ("Wood",           20), ("BronzeNails", 20) },  // → level 1
+            new[] { ("RoundLog",       20), ("BronzeNails", 20) },  // → level 2  (CoreWood)
+            new[] { ("FineWood",       10), ("BronzeNails", 20) },  // → level 3
+            new[] { ("FineWood",       20), ("BronzeNails", 20) },  // → level 4
+            new[] { ("ElderBark",      20), ("IronNails",   20) },  // → level 5
+            new[] { ("Chain",           8), ("IronNails",   20) },  // → level 6
+            new[] { ("Silver",         10), ("IronNails",   20) },  // → level 7
+            new[] { ("LinenThread",    10), ("BlackMetal",  10), ("IronNails", 20) },  // → level 8
+            new[] { ("YggdrasilWood",  20), ("Copper",       5), ("IronNails", 20) },  // → level 9
+            new[] { ("AshWood",        20), ("Flametal",     5) },  // → level 10
+        };
+
+        // Level tints: wood → bronze → corewood → finewood → finewood+ → elder → iron/chain → silver → black metal → mistlands → ashlands
         static readonly Color[] LevelTints = {
             new Color(1.00f, 1.00f, 1.00f), // 0 — default
-            new Color(1.00f, 0.82f, 0.55f), // 1 — bronze
-            new Color(0.70f, 0.72f, 0.75f), // 2 — iron
-            new Color(0.88f, 0.94f, 1.00f), // 3 — silver
-            new Color(0.30f, 0.26f, 0.22f), // 4 — black metal
+            new Color(1.00f, 0.82f, 0.55f), // 1 — bronze warmth
+            new Color(0.55f, 0.38f, 0.22f), // 2 — corewood dark brown
+            new Color(0.95f, 0.88f, 0.72f), // 3 — finewood light
+            new Color(0.88f, 0.78f, 0.58f), // 4 — finewood aged
+            new Color(0.40f, 0.45f, 0.35f), // 5 — elder bark dark green-grey
+            new Color(0.55f, 0.57f, 0.60f), // 6 — iron/chain grey
+            new Color(0.88f, 0.94f, 1.00f), // 7 — silver shimmer
+            new Color(0.25f, 0.22f, 0.20f), // 8 — black metal
+            new Color(0.45f, 0.55f, 0.75f), // 9 — mistlands blue-purple
+            new Color(0.80f, 0.40f, 0.15f), // 10 — ashlands ember orange
         };
 
         public static void ApplyTint(Vagon vagon, int level)
@@ -2075,44 +2575,34 @@ namespace EnvReporter
                         mat.color = tint;
         }
 
+        static readonly BindingFlags _rf = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
+        static System.Reflection.FieldInfo? _wf, _hf;
+
+        // Silent resize — just sets dimensions, no VFX or panel close. Safe to call before inventory loads.
+        public static bool ResizeInventory(Inventory inv, int level)
+        {
+            level = Mathf.Clamp(level, 0, Heights.Length - 1);
+            _wf ??= typeof(Inventory).GetField("m_width",  _rf);
+            _hf ??= typeof(Inventory).GetField("m_height", _rf);
+            if (_wf == null || _hf == null) return false;
+            _wf.SetValue(inv, BaseWidth);
+            _hf.SetValue(inv, Heights[level]);
+            return true;
+        }
+
         public static void ApplySize(Vagon vagon, int level)
         {
             level = Mathf.Clamp(level, 0, Heights.Length - 1);
-            var rf = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
 
-            // Vagon holds its inventory via m_container field (a Container component)
-            var containerField = typeof(Vagon).GetField("m_container", rf);
+            var containerField = typeof(Vagon).GetField("m_container", _rf);
             var container = containerField?.GetValue(vagon) as Container;
             var inv = container?.GetInventory();
-            Plugin.Log.LogInfo($"[EnvR] Cart container={container != null} inv={inv != null}");
-            if (inv == null)
-            {
-                Plugin.Log.LogWarning("[EnvR] Could not get cart inventory via m_container");
-                return;
-            }
+            if (inv == null) { Plugin.Log.LogWarning("[EnvR] Could not get cart inventory via m_container"); return; }
 
-            var wf = typeof(Inventory).GetField("m_width",  rf);
-            var hf = typeof(Inventory).GetField("m_height", rf);
-            if (wf == null || hf == null)
-            {
-                Plugin.Log.LogWarning($"[EnvR] Inventory m_width/m_height fields not found");
-                return;
-            }
-
-            Plugin.Log.LogInfo($"[EnvR] Before resize: {wf.GetValue(inv)}x{hf.GetValue(inv)}");
-            wf.SetValue(inv, BaseWidth);
-            hf.SetValue(inv, Heights[level]);
-            Plugin.Log.LogInfo($"[EnvR] After resize: {wf.GetValue(inv)}x{hf.GetValue(inv)}");
+            if (!ResizeInventory(inv, level)) { Plugin.Log.LogWarning("[EnvR] Inventory m_width/m_height fields not found"); return; }
             inv.m_onChanged?.Invoke();
 
-            // Spawn construction VFX on the cart
-            var scene = ZNetScene.instance;
-            if (scene != null)
-            {
-                var vfxPrefab = scene.GetPrefab("vfx_Place_cart");
-                if (vfxPrefab != null)
-                    UnityEngine.Object.Instantiate(vfxPrefab, vagon.transform.position, UnityEngine.Quaternion.identity);
-            }
+            Plugin.BroadcastVfx(vagon.transform.position, "vfx_Place_cart", 0f);
 
             // Close the panel — player reopens to see new grid size
             var gui = InventoryGui.instance;
@@ -2147,7 +2637,7 @@ namespace EnvReporter
                 int have = CountByPrefab(inv, item);
                 if (have < amount)
                 {
-                    string msg = $"You lack the {item}.";
+                    string msg = $"You lack the {DisplayName(item)}.";
                     if (args != null) args.Context.AddString(msg);
                     else player.Message(MessageHud.MessageType.Center, msg);
                     return;
@@ -2156,6 +2646,7 @@ namespace EnvReporter
             foreach (var (item, amount) in cost)
                 RemoveByPrefab(inv, item, amount);
 
+            nview.ClaimOwnership();
             nview.GetZDO()!.Set("ath_cart_level", nextLevel);
             ApplySize(cart, nextLevel);
             ApplyTint(cart, nextLevel);
@@ -2419,7 +2910,7 @@ namespace EnvReporter
             var dir = direction.normalized;
             var player = Player.m_localPlayer;
 
-            // Redirect any existing world birds within 60m — delayed so they depart as the V-formation arrives
+            // Redirect any existing world birds within 150m
             if (player != null)
             {
                 foreach (var mb in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>())
@@ -2501,13 +2992,15 @@ namespace EnvReporter
                 break;
             }
 
-            // Kill network sync and AI — ZSyncAnimation overrides SetBool every frame if left running
-            string[] killTypes = { "ZSyncAnimation", "ZSyncTransform", "RandomFlyingBird", "ZSFX" };
+            // Disable only the AI and animation-sync so they stop fighting our redirect.
+            // ZSyncTransform must remain enabled — it feeds the bird's moving transform back into
+            // the ZDO so the zone updates as the bird flies. If ZSyncTransform is off, the ZDO zone
+            // freezes at spawn, RemoveObjects never sweeps it naturally, and when the player walks
+            // away the entry becomes a null-gameObject NullRef every frame until they return.
+            string[] killTypes = { "RandomFlyingBird", "ZSyncAnimation", "ZSFX" };
             foreach (var mb in bird.GetComponentsInChildren<MonoBehaviour>(true))
                 if (mb != null && System.Array.IndexOf(killTypes, mb.GetType().Name) >= 0)
-                    Object.DestroyImmediate(mb);
-            foreach (var nv in bird.GetComponentsInChildren<ZNetView>(true))
-                Object.DestroyImmediate(nv);
+                    mb.enabled = false;
             foreach (var ai in bird.GetComponentsInChildren<BaseAI>(true))
                 ai.enabled = false;
 
@@ -2532,7 +3025,25 @@ namespace EnvReporter
                 bird.transform.rotation = Quaternion.LookRotation(dir + wobble * 0.5f);
                 yield return null;
             }
-            if (bird != null) Object.Destroy(bird);
+            if (bird != null)
+            {
+                if (ZNetScene.instance != null)
+                {
+                    // ZNetScene.Destroy(GameObject) removes from m_instances before destroying.
+                    // Compiler resolves instance.Destroy() to inherited static Object.Destroy, so reflect.
+                    // Use GetMethods() loop — exact-type GetMethod can return null due to overload resolution.
+                    System.Reflection.MethodInfo? dm = null;
+                    foreach (var m in typeof(ZNetScene).GetMethods(BindingFlags.Instance | BindingFlags.Public))
+                    {
+                        if (m.Name != "Destroy") continue;
+                        var p = m.GetParameters();
+                        if (p.Length == 1 && p[0].ParameterType == typeof(GameObject)) { dm = m; break; }
+                    }
+                    if (dm != null) dm.Invoke(ZNetScene.instance, new object[] { bird });
+                    else Object.Destroy(bird);
+                }
+                else Object.Destroy(bird);
+            }
         }
 
         IEnumerator SingleBird(Vector3 dir, float speed, Vector3 formationOffset, float delay)
@@ -2698,8 +3209,9 @@ namespace EnvReporter
 
     public class RitualsConfig
     {
-        public bool   Enabled  { get; set; } = true;
-        public float  Cooldown { get; set; } = 60f;
+        public bool   Enabled   { get; set; } = true;
+        public float  Cooldown  { get; set; } = 60f;
+        public bool   ShowHints { get; set; } = true;
         public Dictionary<string, RitualItemConfig> Items { get; set; } = new Dictionary<string, RitualItemConfig>();
     }
 
