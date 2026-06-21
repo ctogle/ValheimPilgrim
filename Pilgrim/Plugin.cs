@@ -2224,7 +2224,7 @@ namespace EnvReporter
 
         static void Prefix(Inventory fromInventory)
         {
-            if (!InventorySavePatch.CartLevels.ContainsKey(fromInventory)) return;
+            if (!InventorySavePatch.Contains(fromInventory)) return;
             if (_gxf == null || _gyf == null) return;
             _saved.Clear();
             foreach (var item in fromInventory.GetAllItems())
@@ -2290,18 +2290,34 @@ namespace EnvReporter
                 inv.Load(pkg);
                 Plugin.Log.LogWarning($"[Cart] ContainerAwake: reloaded items at tier {level}");
             }
-            InventorySavePatch.CartLevels[inv] = level;
+            InventorySavePatch.CartViews[inv] = nview;
         }
     }
 
     [HarmonyPatch(typeof(Inventory), "Save")]
     static class InventorySavePatch
     {
-        internal static readonly Dictionary<Inventory, int> CartLevels = new();
+        // Carts: read level live from ZDO so remote upgrades are always reflected
+        internal static readonly Dictionary<Inventory, ZNetView> CartViews  = new();
+        // Ships: level is fixed per vessel type and never changes at runtime
+        internal static readonly Dictionary<Inventory, int>      FixedLevels = new();
+
+        internal static int GetLevel(Inventory inv)
+        {
+            if (CartViews.TryGetValue(inv, out var nview))
+                return nview.GetZDO()?.GetInt("ath_cart_level") ?? 0;
+            if (FixedLevels.TryGetValue(inv, out int lvl))
+                return lvl;
+            return 0;
+        }
+
+        internal static bool Contains(Inventory inv) =>
+            CartViews.ContainsKey(inv) || FixedLevels.ContainsKey(inv);
 
         static void Prefix(Inventory __instance)
         {
-            if (!CartLevels.TryGetValue(__instance, out int level) || level <= 0) return;
+            int level = GetLevel(__instance);
+            if (level <= 0) return;
             CartUpgrade.ResizeInventory(__instance, level);
         }
     }
@@ -2319,7 +2335,8 @@ namespace EnvReporter
 
         static void Prefix(Inventory __instance)
         {
-            if (!InventorySavePatch.CartLevels.TryGetValue(__instance, out int level)) return;
+            int level = InventorySavePatch.GetLevel(__instance);
+            if (level <= 0) return;
             CartUpgrade.ResizeInventory(__instance, level);
         }
 
@@ -2389,7 +2406,7 @@ namespace EnvReporter
             var rf2 = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
             var cont = typeof(Vagon).GetField("m_container", rf2)?.GetValue(vagon) as Container;
             var inv = cont?.GetInventory();
-            if (inv != null && level > 0) InventorySavePatch.CartLevels[inv] = level;
+            if (inv != null) InventorySavePatch.CartViews[inv] = nview;
             VagonFixedUpdatePatch.EnsurePin(vagon);
         }
     }
@@ -2424,7 +2441,7 @@ namespace EnvReporter
             var inv = container.GetInventory();
             if (inv == null) yield break;
             CartUpgrade.ResizeInventory(inv, level);
-            InventorySavePatch.CartLevels[inv] = level;
+            InventorySavePatch.FixedLevels[inv] = level;
             var bytes = nview.GetZDO()?.GetByteArray("items");
             if (bytes != null && bytes.Length > 0)
                 inv.Load(new ZPackage(bytes));
@@ -2709,7 +2726,6 @@ namespace EnvReporter
             if (inv == null) { Plugin.Log.LogWarning("[EnvR] Could not get cart inventory via m_container"); return; }
 
             if (!ResizeInventory(inv, level)) { Plugin.Log.LogWarning("[EnvR] Inventory m_width/m_height fields not found"); return; }
-            InventorySavePatch.CartLevels[inv] = level;
             inv.m_onChanged?.Invoke();
 
             Plugin.BroadcastVfx(vagon.transform.position, "vfx_Place_cart", 0f);
