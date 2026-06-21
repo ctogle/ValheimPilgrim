@@ -1449,15 +1449,15 @@ namespace EnvReporter
                 ? $" <color=red>({Plugin.RitualCooldownRemaining:F0}s)</color>" : "";
             string countStr = $" <color={(knownKeys.Count < allKeys.Count ? "yellow" : "green")}>{knownKeys.Count}/{allKeys.Count}</color>";
 
+            __result += $"\n<size=14><color=orange>── Offerings{countStr}{cdStr} ──</color>";
             if (Plugin.ShowHintsEnabled)
             {
-                __result += $"\n<size=14><color=orange>── Offerings{countStr}{cdStr} ──</color>";
                 __result += rows.ToString();
                 __result += $"\n<color=grey>[H] Hide</color></size>";
             }
             else
             {
-                __result += $"\n<size=14><color=grey>── Offerings{countStr}{cdStr}\n[H] Show</color></size>";
+                __result += $"\n<color=grey>[H] Show</color></size>";
             }
         }
     }
@@ -2206,6 +2206,55 @@ namespace EnvReporter
         internal static void Reset() { _lastRows = -1; }
     }
 
+    // MoveAll (Take All button) tries to place items at their original grid positions first.
+    // If another mod expanded the player inventory height without rebuilding the grid's
+    // m_elements array, items from our expanded rows (y>=4) can land at y=4/5 in the player
+    // inventory and crash InventoryGrid.UpdateGui via out-of-bounds m_elements access.
+    // Fix: invalidate source positions before the move so all items go through auto-place.
+    [HarmonyPatch(typeof(Inventory), "MoveAll")]
+    static class MoveAllExpandedPatch
+    {
+        static readonly BindingFlags RF = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        static readonly FieldInfo _gpf = typeof(ItemDrop.ItemData).GetField("m_gridPos", RF);
+        static readonly FieldInfo _gxf = _gpf?.FieldType.GetField("x", RF);
+        static readonly FieldInfo _gyf = _gpf?.FieldType.GetField("y", RF);
+
+        // item → saved (x, y) so we can restore for items that couldn't be moved
+        static readonly Dictionary<ItemDrop.ItemData, (int x, int y)> _saved = new();
+
+        static void Prefix(Inventory fromInventory)
+        {
+            if (!InventorySavePatch.CartLevels.ContainsKey(fromInventory)) return;
+            if (_gxf == null || _gyf == null) return;
+            _saved.Clear();
+            foreach (var item in fromInventory.GetAllItems())
+            {
+                var gp = _gpf.GetValue(item);
+                int ox = (int)_gxf.GetValue(gp), oy = (int)_gyf.GetValue(gp);
+                _saved[item] = (ox, oy);
+                // Setting x to -1 makes AddItem(item, stack, x, y) fail bounds check → auto-place
+                _gxf.SetValue(gp, -1);
+                _gpf.SetValue(item, gp);
+            }
+        }
+
+        static void Postfix(Inventory fromInventory)
+        {
+            if (_saved.Count == 0) return;
+            if (_gxf == null || _gyf == null) { _saved.Clear(); return; }
+            // Restore positions only for items still in the source (couldn't be moved)
+            foreach (var item in fromInventory.GetAllItems())
+            {
+                if (!_saved.TryGetValue(item, out var orig)) continue;
+                var gp = _gpf.GetValue(item);
+                _gxf.SetValue(gp, orig.x);
+                _gyf.SetValue(gp, orig.y);
+                _gpf.SetValue(item, gp);
+            }
+            _saved.Clear();
+        }
+    }
+
     [HarmonyPatch(typeof(InventoryGui), "Hide")]
     static class ContainerGuiHidePatch
     {
@@ -2252,9 +2301,71 @@ namespace EnvReporter
 
         static void Prefix(Inventory __instance)
         {
-            if (!CartLevels.TryGetValue(__instance, out int level)) return;
+            if (!CartLevels.TryGetValue(__instance, out int level) || level <= 0) return;
             CartUpgrade.ResizeInventory(__instance, level);
-            Plugin.Log.LogWarning($"[Cart] Inventory.Save prefix: ensured height for tier {level}");
+        }
+    }
+
+    [HarmonyPatch(typeof(Inventory), "Load")]
+    static class InventoryLoadPatch
+    {
+        static readonly BindingFlags _rf = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        static readonly FieldInfo _itemsField    = typeof(Inventory).GetField("m_items",  BindingFlags.Instance | BindingFlags.NonPublic);
+        static readonly FieldInfo _widthField    = typeof(Inventory).GetField("m_width",  BindingFlags.Instance | BindingFlags.NonPublic);
+        static readonly FieldInfo _heightField   = typeof(Inventory).GetField("m_height", BindingFlags.Instance | BindingFlags.NonPublic);
+        static readonly FieldInfo _gridPosField  = typeof(ItemDrop.ItemData).GetField("m_gridPos", _rf);
+        static readonly FieldInfo _gridPosX      = _gridPosField?.FieldType.GetField("x", _rf);
+        static readonly FieldInfo _gridPosY      = _gridPosField?.FieldType.GetField("y", _rf);
+
+        static void Prefix(Inventory __instance)
+        {
+            if (!InventorySavePatch.CartLevels.TryGetValue(__instance, out int level)) return;
+            CartUpgrade.ResizeInventory(__instance, level);
+        }
+
+        // After items are loaded, relocate any with out-of-bounds grid positions.
+        // These can result from saves made before the CartLevels bug was fixed; if left
+        // uncorrected they crash InventoryGrid.UpdateGui via out-of-bounds m_elements access.
+        static void Postfix(Inventory __instance)
+        {
+            if (_itemsField?.GetValue(__instance) is not List<ItemDrop.ItemData> items) return;
+            if (_widthField == null || _heightField == null || _gridPosField == null ||
+                _gridPosX == null || _gridPosY == null) return;
+
+            int w = (int)_widthField.GetValue(__instance);
+            int h = (int)_heightField.GetValue(__instance);
+
+            // Build a set of occupied (x,y) positions so we can find empty ones
+            var occupied = new HashSet<(int, int)>();
+            foreach (var item in items)
+            {
+                var pos = _gridPosField.GetValue(item);
+                int px = (int)_gridPosX.GetValue(pos), py = (int)_gridPosY.GetValue(pos);
+                if (px >= 0 && px < w && py >= 0 && py < h) occupied.Add((px, py));
+            }
+
+            foreach (var item in items)
+            {
+                var pos = _gridPosField.GetValue(item);
+                int px = (int)_gridPosX.GetValue(pos), py = (int)_gridPosY.GetValue(pos);
+                if (px >= 0 && px < w && py >= 0 && py < h) continue;
+
+                // Find first unoccupied slot
+                bool placed = false;
+                for (int sy = 0; sy < h && !placed; sy++)
+                for (int sx = 0; sx < w && !placed; sx++)
+                {
+                    if (occupied.Contains((sx, sy))) continue;
+                    occupied.Add((sx, sy));
+                    _gridPosX.SetValue(pos, sx);
+                    _gridPosY.SetValue(pos, sy);
+                    _gridPosField.SetValue(item, pos);
+                    Plugin.Log.LogInfo($"[EnvR] Relocated '{item.m_shared.m_name}' from ({px},{py}) → ({sx},{sy})");
+                    placed = true;
+                }
+                if (!placed)
+                    Plugin.Log.LogWarning($"[EnvR] No empty slot for out-of-bounds item '{item.m_shared.m_name}' ({px},{py}) in {w}x{h} inv");
+            }
         }
     }
 
@@ -2275,12 +2386,10 @@ namespace EnvReporter
             int level = nview.GetZDO()?.GetInt("ath_cart_level") ?? 0;
             if (level > 0) CartUpgrade.ApplySize(vagon, level);
             CartUpgrade.ApplyTint(vagon, level);
-            // Register inventory so Inventory.Save patch can ensure correct height
             var rf2 = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
             var cont = typeof(Vagon).GetField("m_container", rf2)?.GetValue(vagon) as Container;
             var inv = cont?.GetInventory();
-            if (inv != null) InventorySavePatch.CartLevels[inv] = level;
-            if (level > 0) Plugin.Log.LogWarning($"[Cart] Registered cart inventory tier={level}");
+            if (inv != null && level > 0) InventorySavePatch.CartLevels[inv] = level;
             VagonFixedUpdatePatch.EnsurePin(vagon);
         }
     }
@@ -2600,6 +2709,7 @@ namespace EnvReporter
             if (inv == null) { Plugin.Log.LogWarning("[EnvR] Could not get cart inventory via m_container"); return; }
 
             if (!ResizeInventory(inv, level)) { Plugin.Log.LogWarning("[EnvR] Inventory m_width/m_height fields not found"); return; }
+            InventorySavePatch.CartLevels[inv] = level;
             inv.m_onChanged?.Invoke();
 
             Plugin.BroadcastVfx(vagon.transform.position, "vfx_Place_cart", 0f);

@@ -1,6 +1,7 @@
 # TODO
 
 - **Full YAML parameterization** — every hardcoded value (ship storage levels, cart costs, scale factors, carry bonuses, ritual durations, VFX prefab names, etc.) should be configurable via the YAML config so DMs and server admins can tune the mod without code changes
+- **Fix hidden ritual hint text** — hint text shown before a ritual is discovered should be consistent in style/format with the revealed hint text
 - **Remap ritual ingredients** — revisit which items trigger which rituals; current mapping may not feel thematic enough
 - **Wolf ally ritual** — temporarily summon a wolf that fights for the player, then despawns after a duration
 - **Thunder cracks** — use thunder SFX for dramatic ritual moments or as ambient omens (scheduled events, boss proximity, etc.)
