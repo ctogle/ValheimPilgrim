@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.3.1")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.3.2")]
     public class Plugin : BaseUnityPlugin
     {
         internal static BepInEx.Logging.ManualLogSource Log = null!;
@@ -85,6 +85,7 @@ namespace EnvReporter
         internal static string PlayerSeekFood => Cfg.Rituals.Items.GetValueOrDefault("seek_player")?.Item  ?? "Flint";
         internal static string KindleFood    => Cfg.Rituals.Items.GetValueOrDefault("kindle")?.Item        ?? "Resin";
         internal static string TameFood     => Cfg.Rituals.Items.GetValueOrDefault("tame_flock")?.Item    ?? "BoneFragments";
+        internal static string MeadFood      => Cfg.Rituals.Items.GetValueOrDefault("mead_ripen")?.Item   ?? "Barley";
         internal static string GiantFood        => Cfg.Rituals.Items.GetValueOrDefault("giant")?.Item          ?? "YmirRemains";
         internal static string FlamingSwordFood => Cfg.Rituals.Items.GetValueOrDefault("flaming_sword")?.Item ?? "SurtlingCore";
         // Wildcards: Trophy* → dungeon seek, Mushroom* → restore power
@@ -122,11 +123,32 @@ namespace EnvReporter
             ("Stone",         false, "water_walk",    "Stone"),
             ("AncientSeed",   false, "growth",        "Ancient Seed"),
             ("BoneFragments", false, "tame_flock",    "Bone Fragments"),
+            ("Barley",        false, "mead_ripen",    "Barley"),
             ("Flint",         false, "seek_player",   "Flint"),
             ("Resin",         false, "kindle",        "Resin"),
             ("YmirRemains",   false, "giant",         "Ymir Flesh"),
             ("SurtlingCore",  false, "flaming_sword", "Surtling Core"),
         };
+
+        // Fire types that can trigger rituals, in ascending power order
+        internal static readonly string[] CampfirePrefabs = { "fire_pit", "fire_pit_iron", "hearth", "bonfire", "piece_brazier" };
+
+        // Duration multiplier from fire type × comfort level
+        internal static float RitualMultiplier(Fireplace fp, Player player)
+        {
+            string goName = fp.gameObject.name.ToLower().Replace("(clone)", "").Trim();
+            // Match longest prefix so fire_pit_iron beats fire_pit
+            float fireMult = 1f;
+            int bestLen = 0;
+            foreach (var kv in Cfg.Rituals.FireMultipliers)
+                if (goName.StartsWith(kv.Key) && kv.Key.Length > bestLen)
+                    { bestLen = kv.Key.Length; fireMult = kv.Value; }
+
+            float peak = Cfg.Rituals.ComfortPeakMultiplier;
+            int comfort = player.GetComfortLevel();
+            float comfortMult = 1f + (comfort - 1) * (peak - 1f) / 19f;
+            return fireMult * comfortMult;
+        }
 
         // Global ritual cooldown
         internal static float RitualCooldownRemaining = 0f;
@@ -152,6 +174,7 @@ namespace EnvReporter
         internal static bool  GrowthBlessingActive = false;
         internal static bool  ShowHintsEnabled     = true;
         internal static bool  TameBlessingActive   = false;
+        internal static bool  MeadBlessingActive   = false;
         internal static float FlamingSwordExpiry   = 0f;
         static ItemDrop.ItemData? _flamingSwordItem = null;
         static ItemDrop.ItemData? _origRightItem    = null;
@@ -248,6 +271,21 @@ namespace EnvReporter
             SetDebugEnvSafe(name, vanillaFallback);
             ZRoutedRpc.instance?.InvokeRoutedRPC(ZRoutedRpc.Everybody, "Pilgrim_SetEnv",
                 name, vanillaFallback);
+        }
+
+        // Broadcast debug wind to every client. intensity < 0 resets to vanilla wind.
+        internal static void BroadcastWind(float angle, float intensity)
+        {
+            ApplyWind(angle, intensity);
+            ZRoutedRpc.instance?.InvokeRoutedRPC(ZRoutedRpc.Everybody, "Pilgrim_SetWind",
+                angle, intensity);
+        }
+
+        internal static void ApplyWind(float angle, float intensity)
+        {
+            if (EnvMan.instance == null) return;
+            if (intensity < 0f) EnvMan.instance.ResetDebugWind();
+            else EnvMan.instance.SetDebugWind(angle, intensity);
         }
 
         void Update()
@@ -598,7 +636,7 @@ namespace EnvReporter
 
         // ── Seek logic (shared by command + food trigger) ───────────────────
 
-        internal static void ActivateSeek(Terminal? ctx = null, string message = "The wind stirs.")
+        internal static void ActivateSeek(Terminal? ctx = null, string message = "The wind stirs.", float mult = 1f)
         {
             var player = Player.m_localPlayer;
             if (player == null) return;
@@ -629,13 +667,14 @@ namespace EnvReporter
             if (seTemplate == null) seTemplate = GuidingWindSE; // fallback to our reference
             if (seTemplate != null)
             {
+                seTemplate.m_ttl = SeekEnvDuration * mult;
                 player.GetSEMan().AddStatusEffect(seTemplate, true);
                 Log.LogInfo($"[EnvR] Applied SE: {seTemplate.name} ttl={seTemplate.m_ttl}");
             }
             else
                 Log.LogWarning("[EnvR] GuidingWindSE is null — ObjectDB patch may not have run");
 
-            SeekEnvExpiry = Time.time + SeekEnvDuration;
+            SeekEnvExpiry = Time.time + SeekEnvDuration * mult;
             BroadcastEnv("LastLight", "Twilight_Clear");
 
             if (ctx != null)
@@ -655,7 +694,7 @@ namespace EnvReporter
 
         // ── Ping logic ──────────────────────────────────────────────────────
 
-        internal static void ActivateCooldownReset(Player player, string message = "The flame accepts your offering. {power} is ready.")
+        internal static void ActivateCooldownReset(Player player, string message = "The flame accepts your offering. {power} is ready.", float mult = 1f)
         {
             var rf = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
             var powerField    = typeof(Player).GetField("m_guardianPower",         rf);
@@ -678,8 +717,8 @@ namespace EnvReporter
             string displayName = se?.m_name ?? powerName;
             player.Message(MessageHud.MessageType.Center, message.Replace("{power}", displayName));
 
-            RainExpiry = Time.time + RainDuration;
-            if (EnvMan.instance != null) EnvMan.instance.m_debugEnv = "Rain";
+            RainExpiry = Time.time + RainDuration * mult;
+            BroadcastEnv("Rain", "Rain");
         }
 
         // ── Dungeon seeker ritual ───────────────────────────────────────────
@@ -913,7 +952,7 @@ namespace EnvReporter
 
         // ── Feather ritual — no fall damage for 60s ─────────────────────────
 
-        internal static void ActivateFeatherRitual(Player player, string message = "Light as a feather — fall without fear.")
+        internal static void ActivateFeatherRitual(Player player, string message = "Light as a feather — fall without fear.", float mult = 1f)
         {
             // Grab the equip SE from the Feather Cape item prefab
             var capePrefab = ZNetScene.instance?.GetPrefab("CapeFeather");
@@ -929,34 +968,34 @@ namespace EnvReporter
 
             // Clone it with a custom TTL so it expires after 60s
             var se = Object.Instantiate(featherSE);
-            se.m_ttl          = 60f;
+            float featherDur  = 60f * mult;
+            se.m_ttl          = featherDur;
             se.m_startMessage = "";
             se.m_stopMessage  = "";
 
             player.GetSEMan().AddStatusEffect(se, true);
-            FeatherRitualExpiry = Time.time + 60f; // fallback patch also active
+            FeatherRitualExpiry = Time.time + featherDur; // fallback patch also active
             player.Message(MessageHud.MessageType.Center, message);
         }
 
         // ── Clear skies ritual ──────────────────────────────────────────────
 
-        internal static void ActivateClearSkies(Player player, string message = "The clouds part.")
+        internal static void ActivateClearSkies(Player player, string message = "The clouds part.", float mult = 1f)
         {
-            ClearSkiesExpiry = Time.time + ClearSkiesDuration;
-            if (EnvMan.instance != null) EnvMan.instance.m_debugEnv = "Clear";
-            // Set wind blowing in the direction the player is facing
+            ClearSkiesExpiry = Time.time + ClearSkiesDuration * mult;
+            BroadcastEnv("Clear", "Clear");
             float windAngle = player.transform.eulerAngles.y;
-            EnvMan.instance?.SetDebugWind(windAngle, 0.8f);
+            BroadcastWind(windAngle, 0.8f);
             player.Message(MessageHud.MessageType.Center, message);
             Log.LogInfo($"[Pilgrim] Clear skies active for {ClearSkiesDuration}s, wind angle {windAngle:F0}°");
         }
 
         // ── Water walk ritual ───────────────────────────────────────────────
 
-        internal static void ActivateWaterWalk(Player player, string message = "The sea grows still beneath your feet.")
+        internal static void ActivateWaterWalk(Player player, string message = "The sea grows still beneath your feet.", float mult = 1f)
         {
-            WaterWalkExpiry = Time.time + WaterWalkDuration;
-            if (EnvMan.instance != null) EnvMan.instance.SetDebugWind(0f, 0f);
+            WaterWalkExpiry = Time.time + WaterWalkDuration * mult;
+            BroadcastWind(0f, 0f);
             var se = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == "SE_WaterWalk") ?? WaterWalkSE;
             if (se != null) player.GetSEMan().AddStatusEffect(se, true);
             player.Message(MessageHud.MessageType.Center, message);
@@ -964,9 +1003,9 @@ namespace EnvReporter
 
         // ── Giant ritual ────────────────────────────────────────────────────
 
-        internal static void ActivateGiant(Player player, string message = "The mountain answers. You are vast.")
+        internal static void ActivateGiant(Player player, string message = "The mountain answers. You are vast.", float mult = 1f)
         {
-            float duration = Cfg.Rituals.Items.GetValueOrDefault("giant")?.Duration ?? 180f;
+            float duration = (Cfg.Rituals.Items.GetValueOrDefault("giant")?.Duration ?? 180f) * mult;
             GiantExpiry = Time.time + duration;
             GiantTargetScale = GiantScale;
             player.GetComponent<ZNetView>()?.GetZDO()?.Set("ath_scale", GiantScale);
@@ -991,7 +1030,7 @@ namespace EnvReporter
                 unarmed.m_attack.m_attackOffset = _origAttackOffset * GiantScale;
             }
             VdsSwimSuppressor.Suppress();
-            BroadcastEnv("GoldenAscent", "Twilight_Clear");
+            BroadcastEnv("WarmSnow", "WarmSnow");
             player.Message(MessageHud.MessageType.Center, message);
         }
 
@@ -1040,14 +1079,14 @@ namespace EnvReporter
             player.m_maxCarryWeight = Mathf.Max(player.m_maxCarryWeight - GiantCarryBonus, 300f);
             player.GetSEMan().RemoveStatusEffect(GiantSE?.NameHash() ?? 0);
             VdsSwimSuppressor.Restore();
-            if (EnvMan.instance?.m_debugEnv == "GoldenAscent") EnvMan.instance.m_debugEnv = "Rain";
+            if (EnvMan.instance?.m_debugEnv == "WarmSnow") EnvMan.instance.m_debugEnv = "Rain";
             GiantRainExpiry = Time.time + 600f;
             player.Message(MessageHud.MessageType.TopLeft, "You return to mortal scale.");
         }
 
         // ── Flaming sword ritual ────────────────────────────────────────────
 
-        internal static void ActivateFlamingSword(Player player, string message = "Dyrnwyn answers. Let it burn.")
+        internal static void ActivateFlamingSword(Player player, string message = "Dyrnwyn answers. Let it burn.", float mult = 1f)
         {
             // Deactivate any existing imbue before applying a new one
             if (FlamingSwordExpiry > 0f) DeactivateFlamingSword(player, immediate: true);
@@ -1081,7 +1120,7 @@ namespace EnvReporter
             player.EquipItem(newItem);
             SpawnSmokePuff(player);
 
-            float duration = Cfg.Rituals.Items.GetValueOrDefault("flaming_sword")?.Duration ?? 60f;
+            float duration = (Cfg.Rituals.Items.GetValueOrDefault("flaming_sword")?.Duration ?? 60f) * mult;
             FlamingSwordExpiry = Time.time + duration;
 
             var se = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == "SE_FlamingSword") ?? FlamingSwordSE;
@@ -1145,6 +1184,68 @@ namespace EnvReporter
             SpawnSmokePuff(player);
             player.GetSEMan().RemoveStatusEffect(FlamingSwordSE?.NameHash() ?? 0);
             player.Message(MessageHud.MessageType.TopLeft, "The flame fades.");
+        }
+
+        internal static bool HasAnyActiveRitual(Player player)
+        {
+            if (GiantExpiry        > 0f) return true;
+            if (FlamingSwordExpiry > 0f) return true;
+            if (FeatherRitualExpiry > 0f) return true;
+            if (WaterWalkExpiry    > 0f) return true;
+            if (ClearSkiesExpiry   > 0f) return true;
+            if (RainExpiry         > 0f) return true;
+            if (SeekEnvExpiry      > 0f) return true;
+            if (DungeonEnvExpiry   > 0f) return true;
+            if (HomeEnvExpiry      > 0f) return true;
+            // Guiding wind SE may outlive SeekEnvExpiry
+            if (player.GetSEMan().HaveStatusEffect(GuidingWindSE?.NameHash() ?? 0)) return true;
+            return false;
+        }
+
+        internal static void RelinquishAll(Player player)
+        {
+            if (!HasAnyActiveRitual(player)) return;
+
+            // Rituals with dedicated deactivation paths
+            if (GiantExpiry > 0f)        DeactivateGiant(player);
+            if (FlamingSwordExpiry > 0f) DeactivateFlamingSword(player, immediate: true);
+
+            // Feather: remove SE explicitly (expiry only gates our damage patch)
+            if (FeatherRitualExpiry > 0f)
+            {
+                FeatherRitualExpiry = 0f;
+                var featherCape = ZNetScene.instance?.GetPrefab("CapeFeather")?.GetComponent<ItemDrop>();
+                var featherHash = featherCape?.m_itemData?.m_shared?.m_equipStatusEffect?.NameHash() ?? 0;
+                if (featherHash != 0) player.GetSEMan().RemoveStatusEffect(featherHash);
+            }
+
+            // WaterWalk: remove SE and broadcast wind reset
+            if (WaterWalkExpiry > 0f)
+            {
+                WaterWalkExpiry = 0f;
+                player.GetSEMan().RemoveStatusEffect(WaterWalkSE?.NameHash() ?? 0);
+                BroadcastWind(0f, -1f);
+            }
+
+            // Guiding wind SE + LastLight env
+            bool hadSeek = SeekEnvExpiry > 0f ||
+                           player.GetSEMan().HaveStatusEffect(GuidingWindSE?.NameHash() ?? 0);
+            if (hadSeek)
+            {
+                SeekEnvExpiry = 0f;
+                player.GetSEMan().RemoveStatusEffect(GuidingWindSE?.NameHash() ?? 0);
+            }
+
+            // Remaining env-based: zero expiries and broadcast clear to all clients.
+            bool hadEnv = hadSeek || ClearSkiesExpiry > 0f || RainExpiry > 0f ||
+                          DungeonEnvExpiry > 0f || HomeEnvExpiry > 0f;
+            ClearSkiesExpiry = 0f;
+            RainExpiry       = 0f;
+            DungeonEnvExpiry = 0f;
+            HomeEnvExpiry    = 0f;
+            if (hadEnv) BroadcastEnv("", "");
+
+            player.Message(MessageHud.MessageType.Center, "The ritual ends.");
         }
 
         static void SpawnSmokePuff(Player player)
@@ -1388,13 +1489,12 @@ namespace EnvReporter
     [HarmonyPatch(typeof(Fireplace), "GetHoverText")]
     class FireplaceHoverPatch
     {
-        static readonly string[] CampfirePrefabs = { "fire_pit", "fire_pit_iron", "hearth" };
 
         static void Postfix(Fireplace __instance, ref string __result)
         {
             if (!__instance.IsBurning()) return;
             string goName = __instance.gameObject.name.ToLower().Replace("(clone)", "").Trim();
-            if (!System.Array.Exists(CampfirePrefabs, p => goName.StartsWith(p))) return;
+            if (!System.Array.Exists(Plugin.CampfirePrefabs, p => goName.StartsWith(p))) return;
 
             if (!Plugin.Cfg.Rituals.Enabled) return;
             var player = Player.m_localPlayer;
@@ -1424,6 +1524,7 @@ namespace EnvReporter
                     "water_walk"    => "Stone",
                     "growth"        => "Ancient Seed",
                     "tame_flock"    => "Bone Fragments",
+                    "mead_ripen"    => "Barley",
                     "seek_player"   => "Flint",
                     "kindle"        => "Resin",
                     "giant"         => "Ymir Flesh",
@@ -1467,7 +1568,6 @@ namespace EnvReporter
     [HarmonyPatch(typeof(Player), "UseHotbarItem")]
     class UseHotbarItemPatch
     {
-        static readonly string[] CampfirePrefabs = { "fire_pit", "fire_pit_iron", "hearth" };
 
         static bool Prefix(Player __instance, int index)
         {
@@ -1481,7 +1581,7 @@ namespace EnvReporter
             if (fp == null || !fp.IsBurning()) return true;
 
             string goName = fp.gameObject.name.ToLower().Replace("(clone)", "").Trim();
-            if (!System.Array.Exists(CampfirePrefabs, p => goName.StartsWith(p))) return true;
+            if (!System.Array.Exists(Plugin.CampfirePrefabs, p => goName.StartsWith(p))) return true;
             if (!Plugin.Cfg.Rituals.Enabled) return true;
 
             // Check hotbar slot (index is 1-based in Valheim)
@@ -1508,6 +1608,7 @@ namespace EnvReporter
                          || (prefab == Plugin.PlayerSeekFood && RitualEnabled("seek_player"))
                          || (prefab == Plugin.KindleFood     && RitualEnabled("kindle"))
                          || (prefab == Plugin.TameFood       && RitualEnabled("tame_flock"))
+                         || (prefab == Plugin.MeadFood       && RitualEnabled("mead_ripen"))
                          || (prefab == Plugin.GiantFood       && RitualEnabled("giant"))
                          || (prefab == Plugin.FlamingSwordFood && RitualEnabled("flaming_sword"));
             if (!isRitual) return true;
@@ -1521,13 +1622,14 @@ namespace EnvReporter
             }
 
             Plugin.SpawnRitualVFX(fp.transform.position, __instance.transform.position);
+            float ritualMult = Plugin.RitualMultiplier(fp, __instance);
             void Consume() { CartUpgrade.RemoveByPrefab(__instance.GetInventory(), prefab, 1); Plugin.RitualCooldownRemaining = Plugin.RitualCooldownDuration; }
 
             if (prefab == Plugin.SeekFood)
             {
                 if (__instance.GetSEMan().HaveStatusEffect(Plugin.GuidingWindSE?.NameHash() ?? 0))
                 { __instance.Message(MessageHud.MessageType.Center, "The wind already guides you."); return false; }
-                Consume(); Plugin.ActivateSeek(message: RitualMsg("seek_altar", "The wind stirs.")); return false;
+                Consume(); Plugin.ActivateSeek(message: RitualMsg("seek_altar", "The wind stirs."), mult: ritualMult); return false;
             }
             if (prefab.StartsWith("Mushroom"))
             {
@@ -1535,7 +1637,7 @@ namespace EnvReporter
                 var cdField = typeof(Player).GetField("m_guardianPowerCooldown", rf0);
                 float cd0 = cdField?.GetValue(__instance) is float v ? v : 0f;
                 if (cd0 <= 0f) { __instance.Message(MessageHud.MessageType.Center, "Your power is already ready."); return false; }
-                Consume(); Plugin.ActivateCooldownReset(__instance, RitualMsg("restore_power", "The storm answers.")); return false;
+                Consume(); Plugin.ActivateCooldownReset(__instance, RitualMsg("restore_power", "The storm answers."), ritualMult); return false;
             }
             if (prefab == Plugin.HomeFood)
             {
@@ -1543,7 +1645,7 @@ namespace EnvReporter
             }
             if (prefab == Plugin.FeatherFood)
             {
-                Consume(); Plugin.ActivateFeatherRitual(__instance, RitualMsg("feather_fall", "The feathers catch the wind.")); return false;
+                Consume(); Plugin.ActivateFeatherRitual(__instance, RitualMsg("feather_fall", "The feathers catch the wind."), ritualMult); return false;
             }
             if (prefab == Plugin.TraderFood)
             {
@@ -1555,11 +1657,11 @@ namespace EnvReporter
             }
             if (prefab == "GreydwarfEye")
             {
-                Consume(); Plugin.ActivateClearSkies(__instance, RitualMsg("clear_skies", "The clouds part.")); return false;
+                Consume(); Plugin.ActivateClearSkies(__instance, RitualMsg("clear_skies", "The clouds part."), ritualMult); return false;
             }
             if (prefab == "Stone")
             {
-                Consume(); Plugin.ActivateWaterWalk(__instance, RitualMsg("water_walk", "The sea grows still beneath your feet.")); return false;
+                Consume(); Plugin.ActivateWaterWalk(__instance, RitualMsg("water_walk", "The sea grows still beneath your feet."), ritualMult); return false;
             }
             if (prefab == Plugin.GrowthFood)
             {
@@ -1585,10 +1687,18 @@ namespace EnvReporter
                 __instance.Message(MessageHud.MessageType.Center, RitualMsg("tame_flock", "The bones remember loyalty. Sleep, and your flock will answer."));
                 return false;
             }
+            if (prefab == Plugin.MeadFood)
+            {
+                if (Plugin.MeadBlessingActive)
+                { __instance.Message(MessageHud.MessageType.Center, "The mead already ripens in your dreams."); return false; }
+                Consume(); Plugin.MeadBlessingActive = true;
+                __instance.Message(MessageHud.MessageType.Center, RitualMsg("mead_ripen", "The grain remembers the harvest. Sleep, and your mead will answer."));
+                return false;
+            }
             if (prefab == Plugin.GiantFood)
             {
                 if (RitualEnabled("giant"))
-                { Consume(); Plugin.ActivateGiant(__instance, RitualMsg("giant", "The mountain answers. You are vast.")); return false; }
+                { Consume(); Plugin.ActivateGiant(__instance, RitualMsg("giant", "The mountain answers. You are vast."), ritualMult); return false; }
             }
             if (prefab == Plugin.FlamingSwordFood && RitualEnabled("flaming_sword"))
             {
@@ -1596,7 +1706,7 @@ namespace EnvReporter
                 var held = typeof(Humanoid).GetField("m_rightItem", rf3)?.GetValue(__instance) as ItemDrop.ItemData;
                 if (held?.m_shared?.m_skillType != Skills.SkillType.Swords)
                 { __instance.Message(MessageHud.MessageType.Center, "You must hold a sword to summon Dyrnwyn."); return false; }
-                Consume(); Plugin.ActivateFlamingSword(__instance, RitualMsg("flaming_sword", "Dyrnwyn answers. Let it burn.")); return false;
+                Consume(); Plugin.ActivateFlamingSword(__instance, RitualMsg("flaming_sword", "Dyrnwyn answers. Let it burn."), ritualMult); return false;
             }
 
             // Catch-all: suppress vanilla for any ritual item so we never see game rejection messages
@@ -1663,6 +1773,30 @@ namespace EnvReporter
             }
             if (tameCount > 0)
                 __instance.Message(MessageHud.MessageType.TopLeft, $"{tameCount} creatures answered the bond.");
+
+            // Mead blessing
+            if (!Plugin.MeadBlessingActive) return;
+            Plugin.MeadBlessingActive = false;
+            int meadCount = 0;
+            foreach (var fermenter in UnityEngine.Object.FindObjectsOfType<Fermenter>())
+            {
+                if (Vector3.Distance(fermenter.transform.position, pos) > radius) continue;
+                var nview3 = fermenter.GetComponent<ZNetView>();
+                if (nview3 == null || !nview3.IsValid()) continue;
+                string content = nview3.GetZDO().GetString(ZDOVars.s_content);
+                if (string.IsNullOrEmpty(content)) continue;
+                long startTicks = nview3.GetZDO().GetLong(ZDOVars.s_startTime, 0L);
+                if (startTicks == 0L) continue;
+                var startDt = new System.DateTime(startTicks);
+                double elapsed = (ZNet.instance.GetTime() - startDt).TotalSeconds;
+                if (elapsed >= fermenter.m_fermentationDuration) continue;
+                nview3.ClaimOwnership();
+                long doneTicks = (ZNet.instance.GetTime() - System.TimeSpan.FromSeconds(fermenter.m_fermentationDuration)).Ticks;
+                nview3.GetZDO().Set(ZDOVars.s_startTime, doneTicks);
+                meadCount++;
+            }
+            if (meadCount > 0)
+                __instance.Message(MessageHud.MessageType.TopLeft, $"{meadCount} fermenters answered the blessing.");
         }
     }
 
@@ -1733,7 +1867,7 @@ namespace EnvReporter
             if (em != null)
             {
                 em.ResetDebugWind();
-                if (em.m_debugEnv == "GoldenAscent")
+                if (em.m_debugEnv == "WarmSnow")
                     em.m_debugEnv = "";
                 if (em.m_debugEnv == "DreamWalk" && Plugin.HomeEnvExpiry <= 0f)
                     em.m_debugEnv = "";
@@ -1919,6 +2053,12 @@ namespace EnvReporter
         {
             if (__instance != Player.m_localPlayer) return;
             if (Plugin.GiantExpiry <= 0f || Time.time > Plugin.GiantExpiry) return;
+            // Fall damage lives in m_damage (flat field), handle separately
+            if (hit.m_hitType == HitData.HitType.Fall)
+            {
+                hit.m_damage.m_damage *= 0.2f;
+                return;
+            }
             hit.m_damage.m_blunt    *= 0.1f;
             hit.m_damage.m_slash    *= 0.1f;
             hit.m_damage.m_pierce   *= 0.1f;
@@ -2017,9 +2157,13 @@ namespace EnvReporter
             __result = __result.Replace("Cart", level == 0 ? "Cart" : $"Cart - Tier {level}");
             int slots = CartUpgrade.BaseWidth * CartUpgrade.Heights[Mathf.Clamp(level, 0, CartUpgrade.Heights.Length - 1)];
 
+            bool braked = nview?.GetZDO()?.GetBool("ath_cart_brake") ?? false;
+            string brakeLabel = braked ? "[<color=yellow>B</color>] <color=orange>Handbrake ON</color>" : "[<color=yellow>B</color>] Handbrake";
+
             if (level >= CartUpgrade.Heights.Length - 1)
             {
                 __result += $"\n<color=grey>Cart fully reinforced</color>";
+                __result += $"\n{brakeLabel}";
                 __result += $"\n[<color=yellow>G</color>] Release cart";
                 return;
             }
@@ -2028,6 +2172,7 @@ namespace EnvReporter
             __result += $"\n[<color=yellow>Shift+E</color>] Reinforce cart";
             foreach (var (item, amount) in cost)
                 __result += $"\n  {amount}x {CartUpgrade.DisplayName(item)}";
+            __result += $"\n{brakeLabel}";
             __result += $"\n[<color=yellow>G</color>] Release cart";
         }
     }
@@ -2059,6 +2204,7 @@ namespace EnvReporter
         static readonly BindingFlags RF = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
         internal static readonly Dictionary<ZDOID, Minimap.PinData> _cartPins = new();
         static float _pinUpdateTimer = 0f;
+        static readonly Dictionary<ZDOID, (float drag, float angularDrag)> _origDrags = new();
 
         static System.Reflection.MethodInfo? _addPinMethod;
 
@@ -2114,6 +2260,25 @@ namespace EnvReporter
 
         static void Postfix(Vagon __instance)
         {
+            var nview = __instance.GetComponent<ZNetView>();
+            if (nview == null || !nview.IsValid()) return;
+
+            // Handbrake — apply drag every FixedUpdate on the owner
+            if (nview.IsOwner())
+            {
+                var rb = __instance.GetComponent<Rigidbody>();
+                if (rb != null)
+                {
+                    var uid = nview.GetZDO()!.m_uid;
+                    if (!_origDrags.ContainsKey(uid))
+                        _origDrags[uid] = (rb.drag, rb.angularDrag);
+                    var orig = _origDrags[uid];
+                    bool braked = nview.GetZDO()?.GetBool("ath_cart_brake") ?? false;
+                    rb.drag        = braked ? 80f : orig.drag;
+                    rb.angularDrag = braked ? 80f : orig.angularDrag;
+                }
+            }
+
             // Minimap pin — update every 2s to avoid per-frame overhead
             _pinUpdateTimer -= Time.fixedDeltaTime;
             if (_pinUpdateTimer > 0f) return;
@@ -2152,7 +2317,11 @@ namespace EnvReporter
                         isShip = ShipStoragePatch.ShipLevels.ContainsKey(sn);
                     }
                 }
-                if (!isVagon && !isShip) return;
+                if (!isVagon && !isShip)
+                {
+                    RestorePanel(__instance);
+                    return;
+                }
 
                 int rows = currentContainer.GetInventory()?.GetHeight() ?? 3;
                 if (rows == _lastRows) return;
@@ -2203,7 +2372,30 @@ namespace EnvReporter
             catch (System.Exception ex) { Plugin.Log.LogWarning($"[Resize] {ex.Message}"); }
         }
 
-        internal static void Reset() { _lastRows = -1; }
+        static void RestorePanel(InventoryGui gui)
+        {
+            if (_defaultH == 0f || _lastRows == -1) return;
+            var containerFieldVal = typeof(InventoryGui).GetField("m_container", RF)?.GetValue(gui);
+            RectTransform? panelRt = null;
+            if (containerFieldVal is RectTransform rt) panelRt = rt;
+            else if (containerFieldVal is GameObject go) panelRt = go.GetComponent<RectTransform>();
+            if (panelRt == null) return;
+            panelRt.sizeDelta = new Vector2(panelRt.sizeDelta.x, _defaultH);
+            for (int i = 0; i < panelRt.childCount; i++)
+            {
+                var ch = panelRt.GetChild(i) as RectTransform;
+                if (ch == null) continue;
+                if (_origPos.TryGetValue(ch.name, out var op))  ch.anchoredPosition = op;
+                if (_origSize.TryGetValue(ch.name, out var os)) ch.sizeDelta = os;
+            }
+            _lastRows = -1;
+        }
+
+        internal static void Reset()
+        {
+            if (InventoryGui.instance != null) RestorePanel(InventoryGui.instance);
+            else _lastRows = -1;
+        }
     }
 
     // MoveAll (Take All button) tries to place items at their original grid positions first.
@@ -2430,6 +2622,14 @@ namespace EnvReporter
             if (ship == null) return;
             string rawName = ship.gameObject.name.ToLower().Replace("(clone)", "").Trim();
             if (!ShipLevels.TryGetValue(rawName, out int level)) return;
+            // Resize and register synchronously so InventorySavePatch sees the correct height
+            // before any Container.Save that fires during this same Awake frame.
+            var invEarly = __instance.GetInventory();
+            if (invEarly != null)
+            {
+                CartUpgrade.ResizeInventory(invEarly, level);
+                InventorySavePatch.FixedLevels[invEarly] = level;
+            }
             __instance.StartCoroutine(RestoreAfterLoad(__instance, level));
         }
 
@@ -2440,6 +2640,7 @@ namespace EnvReporter
             if (nview == null || !nview.IsValid()) yield break;
             var inv = container.GetInventory();
             if (inv == null) yield break;
+            // Re-resize in case vanilla re-loaded the inventory between Awake and now.
             CartUpgrade.ResizeInventory(inv, level);
             InventorySavePatch.FixedLevels[inv] = level;
             var bytes = nview.GetZDO()?.GetByteArray("items");
@@ -2518,6 +2719,9 @@ namespace EnvReporter
 
             ZRoutedRpc.instance.Register<string, string>("Pilgrim_SetEnv", (_, envName, fallback) =>
                 Plugin.SetDebugEnvSafe(envName, fallback));
+
+            ZRoutedRpc.instance.Register<float, float>("Pilgrim_SetWind", (_, angle, intensity) =>
+                Plugin.ApplyWind(angle, intensity));
         }
     }
 
@@ -2580,10 +2784,61 @@ namespace EnvReporter
         }
     }
 
+    // ── Relinquish all rituals on death ─────────────────────────────────────
+
+    [HarmonyPatch(typeof(Player), "OnDeath")]
+    static class PlayerDeathRelinquishPatch
+    {
+        static void Postfix(Player __instance)
+        {
+            if (__instance != Player.m_localPlayer) return;
+            Plugin.RelinquishAll(__instance);
+        }
+    }
+
+    // ── Z hold (3s): relinquish all active rituals ───────────────────────────
+
+    [HarmonyPatch(typeof(Player), "Update")]
+    static class RelinquishKeyPatch
+    {
+        static float _holdTime = 0f;
+        static int   _lastTick = -1;
+
+        static void Postfix(Player __instance)
+        {
+            if (__instance != Player.m_localPlayer) return;
+            if (!Plugin.Cfg.Rituals.Enabled) return;
+
+            if (Input.GetKey(KeyCode.Z) && Plugin.HasAnyActiveRitual(__instance))
+            {
+                _holdTime += Time.deltaTime;
+                int secondsLeft = Mathf.CeilToInt(3f - _holdTime);
+                int tick = Mathf.FloorToInt(_holdTime);
+                if (tick != _lastTick)
+                {
+                    _lastTick = tick;
+                    if (_holdTime < 3f)
+                        __instance.Message(MessageHud.MessageType.TopLeft,
+                            $"Relinquish ritual... {secondsLeft}");
+                }
+                if (_holdTime >= 3f)
+                {
+                    _holdTime = 0f;
+                    _lastTick = -1;
+                    Plugin.RelinquishAll(__instance);
+                }
+            }
+            else
+            {
+                _holdTime = 0f;
+                _lastTick = -1;
+            }
+        }
+    }
+
     [HarmonyPatch(typeof(Player), "Update")]
     static class PlayerHintsTogglePatch
     {
-        static readonly string[] CampfirePrefabs = { "fire_pit", "fire_pit_iron", "hearth" };
 
         static void Postfix(Player __instance)
         {
@@ -2596,7 +2851,7 @@ namespace EnvReporter
             var fp = hoverObj.GetComponentInParent<Fireplace>();
             if (fp == null || !fp.IsBurning()) return;
             string goName = fp.gameObject.name.ToLower().Replace("(clone)", "").Trim();
-            if (!System.Array.Exists(CampfirePrefabs, p => goName.StartsWith(p))) return;
+            if (!System.Array.Exists(Plugin.CampfirePrefabs, p => goName.StartsWith(p))) return;
 
             Plugin.ShowHintsEnabled = !Plugin.ShowHintsEnabled;
             __instance.Message(MessageHud.MessageType.TopLeft,
@@ -2803,7 +3058,7 @@ namespace EnvReporter
         public bool   Active      = false;
         public float  Probability = 0.6f;
         public List<string> NightPool = new List<string> { "DreamWalk", "VoidWhisper", "MidnightVeil" };
-        public List<string> NoonPool  = new List<string> { "GoldenAscent", "PilgrimDawn", "TropicalHaze" };
+        public List<string> NoonPool  = new List<string> { "Twilight_Clear", "PilgrimDawn", "TropicalHaze" };
 
         bool    _lastNight;
         bool    _noonRolled;
@@ -2818,7 +3073,6 @@ namespace EnvReporter
             KeyCode.Alpha5, KeyCode.Alpha6, KeyCode.Alpha7, KeyCode.Alpha8
         };
 
-        static readonly string[] CampfirePrefabs = { "fire_pit", "fire_pit_iron", "hearth" };
 
         public void RunDelayed(float delay, System.Action action) => StartCoroutine(DelayedAction(delay, action));
 
@@ -2840,7 +3094,7 @@ namespace EnvReporter
                 var em = EnvMan.instance;
                 if (Time.time >= Plugin.ClearSkiesExpiry)
                 {
-                    if (em != null && em.m_debugEnv == "Clear") em.m_debugEnv = "";
+                    if (em != null && em.m_debugEnv == "Clear") Plugin.BroadcastEnv("", "");
                     Plugin.ClearSkiesExpiry = 0f;
                     Player.m_localPlayer?.Message(MessageHud.MessageType.TopLeft, "The skies begin to darken again.");
                 }
@@ -2857,7 +3111,7 @@ namespace EnvReporter
                 var em = EnvMan.instance;
                 if (Time.time >= Plugin.GiantRainExpiry)
                 {
-                    if (em != null && em.m_debugEnv == "Rain") em.m_debugEnv = "";
+                    if (em != null && em.m_debugEnv == "Rain") Plugin.BroadcastEnv("", "");
                     Plugin.GiantRainExpiry = 0f;
                 }
                 else if (em != null && em.m_debugEnv != "Rain")
@@ -2872,7 +3126,7 @@ namespace EnvReporter
                 var em = EnvMan.instance;
                 if (Time.time >= Plugin.RainExpiry)
                 {
-                    if (em != null && em.m_debugEnv == "Rain") em.m_debugEnv = "";
+                    if (em != null && em.m_debugEnv == "Rain") Plugin.BroadcastEnv("", "");
                     Plugin.RainExpiry = 0f;
                     Player.m_localPlayer?.Message(MessageHud.MessageType.TopLeft, "The rain passes.");
                 }
@@ -3023,6 +3277,26 @@ namespace EnvReporter
                 else
                 {
                     player.Message(MessageHud.MessageType.TopLeft, "[G] No cart nearby.");
+                }
+            }
+
+            // X key: toggle cart handbrake (only while attached)
+            if (Input.GetKeyDown(KeyCode.B))
+            {
+                Vagon? brakeTarget = null;
+                foreach (var v in Object.FindObjectsOfType<Vagon>())
+                    if (v.IsAttached(player)) { brakeTarget = v; break; }
+
+                if (brakeTarget != null)
+                {
+                    var bnview = brakeTarget.GetComponent<ZNetView>();
+                    if (bnview != null && bnview.IsValid())
+                    {
+                        bnview.ClaimOwnership();
+                        bool current = bnview.GetZDO()?.GetBool("ath_cart_brake") ?? false;
+                        bnview.GetZDO()!.Set("ath_cart_brake", !current);
+                        player.Message(MessageHud.MessageType.TopLeft, !current ? "Handbrake ON." : "Handbrake OFF.");
+                    }
                 }
             }
 
@@ -3303,6 +3577,15 @@ namespace EnvReporter
             {
                 Enabled  = true,
                 Cooldown = 60f,
+                ComfortPeakMultiplier = 4f,
+                FireMultipliers = new Dictionary<string, float>
+                {
+                    ["fire_pit"]      = 1.0f,
+                    ["fire_pit_iron"] = 1.5f,
+                    ["piece_brazier"] = 1.5f,
+                    ["hearth"]        = 2.0f,
+                    ["bonfire"]       = 2.5f,
+                },
                 Items    = new Dictionary<string, RitualItemConfig>
                 {
                     ["seek_altar"]    = new RitualItemConfig { Enabled = true, Item = "RawMeat",    HoverText = "Seek the next altar",       Message = "The wind stirs — {boss} awaits." },
@@ -3317,6 +3600,7 @@ namespace EnvReporter
                     ["seek_player"]   = new RitualItemConfig { Enabled = true, Item = "Flint",      HoverText = "Seek a fellow pilgrim",      Message = "Find fellowship." },
                     ["kindle"]        = new RitualItemConfig { Enabled = true, Item = "Resin",      HoverText = "Kindle nearby fires",        Message = "The darkness yields." },
                     ["tame_flock"]    = new RitualItemConfig { Enabled = true, Item = "BoneFragments", HoverText = "Tame the flock",          Message = "The bones remember loyalty. Sleep, and your flock will answer." },
+                    ["mead_ripen"]    = new RitualItemConfig { Enabled = true, Item = "Barley",         HoverText = "Ripen the mead",           Message = "The grain remembers the harvest. Sleep, and your mead will answer." },
                     ["giant"]         = new RitualItemConfig { Enabled = true, Item = "YmirRemains",   HoverText = "Become the mountain",      Message = "The mountain answers. You are vast.", Duration = 60f },
                     ["flaming_sword"] = new RitualItemConfig { Enabled = true, Item = "SurtlingCore", HoverText = "Summon Dyrnwyn", Message = "Dyrnwyn answers. Let it burn.", Duration = 60f },
                 },
@@ -3345,6 +3629,15 @@ namespace EnvReporter
         public bool   Enabled   { get; set; } = true;
         public float  Cooldown  { get; set; } = 60f;
         public bool   ShowHints { get; set; } = true;
+        public float  ComfortPeakMultiplier { get; set; } = 4f;
+        public Dictionary<string, float> FireMultipliers { get; set; } = new Dictionary<string, float>
+        {
+            ["fire_pit"]      = 1.0f,
+            ["fire_pit_iron"] = 1.5f,
+            ["piece_brazier"] = 1.5f,
+            ["hearth"]        = 2.0f,
+            ["bonfire"]       = 2.5f,
+        };
         public Dictionary<string, RitualItemConfig> Items { get; set; } = new Dictionary<string, RitualItemConfig>();
     }
 

@@ -1,7 +1,11 @@
 # TODO
 
+- **Track last ship driven** — add a minimap pin for the last ship driven, similar to the cart pin
+- **Cart drag ritual** — ritual that temporarily lowers cart drag so it pulls more easily over terrain
+- **Finish fermenting meads on sleep** — like the crop growth and tame flock sleep rituals, complete nearby fermenter progress when the player sleeps
+- **Giant mode overexposure** — too bright/washed out on mountain terrain; investigate env/postprocessing overrides during giant ritual
+
 - **Full YAML parameterization** — every hardcoded value (ship storage levels, cart costs, scale factors, carry bonuses, ritual durations, VFX prefab names, etc.) should be configurable via the YAML config so DMs and server admins can tune the mod without code changes
-- **Fix hidden ritual hint text** — hint text shown before a ritual is discovered should be consistent in style/format with the revealed hint text
 - **Remap ritual ingredients** — revisit which items trigger which rituals; current mapping may not feel thematic enough
 - **Wolf ally ritual** — temporarily summon a wolf that fights for the player, then despawns after a duration
 - **Thunder cracks** — use thunder SFX for dramatic ritual moments or as ambient omens (scheduled events, boss proximity, etc.)
