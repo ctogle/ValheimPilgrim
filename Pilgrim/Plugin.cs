@@ -19,7 +19,7 @@ namespace EnvReporter
         internal static SE_GuidingWind? GuidingWindSE;
         internal static SE_WaterWalk?   WaterWalkSE;
         internal static SE_Giant?       GiantSE;
-        internal static SE_FlamingSword? FlamingSwordSE;
+        internal static SE_LegendaryWeapon? LegendarySE;
 
         // ── Config ──────────────────────────────────────────────────────────
         internal static PilgrimConfig Cfg = PilgrimConfig.Default();
@@ -87,12 +87,20 @@ namespace EnvReporter
         internal static string TameFood     => Cfg.Rituals.Items.GetValueOrDefault("tame_flock")?.Item    ?? "BoneFragments";
         internal static string MeadFood      => Cfg.Rituals.Items.GetValueOrDefault("mead_ripen")?.Item   ?? "Barley";
         internal static string GiantFood        => Cfg.Rituals.Items.GetValueOrDefault("giant")?.Item          ?? "YmirRemains";
-        internal static string FlamingSwordFood => Cfg.Rituals.Items.GetValueOrDefault("flaming_sword")?.Item ?? "SurtlingCore";
+        internal static string? LegendaryIngredientMatch(string prefab)
+        {
+            foreach (var def in LegendaryDefs)
+                if (prefab == (Cfg.Rituals.Items.GetValueOrDefault(def.Key)?.Item ?? def.DefaultIngredient))
+                    return def.Key;
+            return null;
+        }
         // Wildcards: Trophy* → dungeon seek, Mushroom* → restore power
         // (prefix matching stays hardcoded; hover text and messages come from config)
 
         // Seek target override — when set, SE_GuidingWind tracks this position instead of next boss altar
         internal static Vector3? SeekOverrideTarget = null;
+        // Cached boss altar position from server RPC — used by SE_GuidingWind wind refresh
+        internal static Vector3? BossSeekTarget = null;
 
         // ── Ritual discovery ────────────────────────────────────────────────────
         internal static bool IsRitualKnown(Player player, string key) =>
@@ -127,7 +135,35 @@ namespace EnvReporter
             ("Flint",         false, "seek_player",   "Flint"),
             ("Resin",         false, "kindle",        "Resin"),
             ("YmirRemains",   false, "giant",         "Ymir Flesh"),
-            ("SurtlingCore",  false, "flaming_sword", "Surtling Core"),
+            ("SurtlingCore",  false, "flaming_sword",  "Surtling Core"),
+            ("Ooze",          false, "jotun_bane",     "Ooze"),
+            ("Copper",        false, "krom",            "Copper"),
+            ("Iron",          false, "slayer",          "Iron"),
+            ("Bloodbag",      false, "skull_splittur",  "Blood Bag"),
+            ("Tin",           false, "himminafl",       "Tin"),
+            ("Crystal",       false, "mistwalker",      "Crystal"),
+        };
+
+        internal struct LegendaryDef
+        {
+            public string Key;
+            public string Prefab;
+            public string DefaultIngredient;
+            public Skills.SkillType SkillType;
+            public string SkillLabel;
+            public string DefaultActivateMsg;
+            public string DefaultDeactivateMsg;
+        }
+
+        internal static readonly LegendaryDef[] LegendaryDefs =
+        {
+            new LegendaryDef { Key="flaming_sword",  Prefab="SwordIronFire",    DefaultIngredient="SurtlingCore", SkillType=Skills.SkillType.Swords,         SkillLabel="sword",   DefaultActivateMsg="Dyrnwyn answers. Let it burn.",       DefaultDeactivateMsg="The flame fades." },
+            new LegendaryDef { Key="jotun_bane",     Prefab="AxeJotunBane",     DefaultIngredient="Ooze",         SkillType=Skills.SkillType.Axes,            SkillLabel="axe",     DefaultActivateMsg="Jotun Bane answers the call.",        DefaultDeactivateMsg="The axe rests." },
+            new LegendaryDef { Key="krom",           Prefab="THSwordKrom",      DefaultIngredient="Copper",   SkillType=Skills.SkillType.Swords, SkillLabel="sword", DefaultActivateMsg="Krom rises from the deep.",           DefaultDeactivateMsg="Krom is stilled." },
+            new LegendaryDef { Key="slayer",         Prefab="THSwordSlayer",    DefaultIngredient="Iron",     SkillType=Skills.SkillType.Swords, SkillLabel="sword", DefaultActivateMsg="Slayer hungers.",                     DefaultDeactivateMsg="The slayer rests." },
+            new LegendaryDef { Key="skull_splittur", Prefab="BattleaxeSkullSplittur", DefaultIngredient="Bloodbag", SkillType=Skills.SkillType.Axes,   SkillLabel="axe",   DefaultActivateMsg="Skull Splittur demands a reckoning.", DefaultDeactivateMsg="The axe is sated." },
+            new LegendaryDef { Key="himminafl",      Prefab="AtgeirHimminAfl",  DefaultIngredient="Tin",          SkillType=Skills.SkillType.Polearms,        SkillLabel="polearm", DefaultActivateMsg="Himminafl crackles with thunder.",    DefaultDeactivateMsg="The thunder fades." },
+            new LegendaryDef { Key="mistwalker",     Prefab="SwordMistwalker",  DefaultIngredient="Crystal",      SkillType=Skills.SkillType.Swords,          SkillLabel="sword",   DefaultActivateMsg="Mistwalker parts the veil.",          DefaultDeactivateMsg="The mist returns." },
         };
 
         // Fire types that can trigger rituals, in ascending power order
@@ -175,10 +211,11 @@ namespace EnvReporter
         internal static bool  ShowHintsEnabled     = true;
         internal static bool  TameBlessingActive   = false;
         internal static bool  MeadBlessingActive   = false;
-        internal static float FlamingSwordExpiry   = 0f;
-        static ItemDrop.ItemData? _flamingSwordItem = null;
-        static ItemDrop.ItemData? _origRightItem    = null;
-        internal const string FlamingSwordPrefab = "SwordIronFire";
+        internal static float FlamingSwordExpiry     = 0f; // alias kept for expiry-check sites
+        internal static float LegendaryExpiry       => FlamingSwordExpiry;
+        internal static LegendaryDef _activeLegendaryDef;
+        static ItemDrop.ItemData? _legendaryActiveItem = null;
+        static ItemDrop.ItemData? _legendaryOrigItem   = null;
         internal static float GiantExpiry          = 0f;
         internal static float GiantTargetScale     = 1f;
         internal const  float GiantCarryBonus      = 300f;
@@ -636,12 +673,19 @@ namespace EnvReporter
 
         // ── Seek logic (shared by command + food trigger) ───────────────────
 
+        // Pending seek state — held while waiting for server RPC response
+        static string?  _seekPendingBossName;
+        static string?  _seekPendingMessage;
+        static float    _seekPendingMult;
+        static Terminal? _seekPendingCtx;
+
         internal static void ActivateSeek(Terminal? ctx = null, string message = "The wind stirs.", float mult = 1f)
         {
             var player = Player.m_localPlayer;
             if (player == null) return;
 
-            SeekOverrideTarget = null; // boss seek clears any dungeon override
+            SeekOverrideTarget = null;
+            BossSeekTarget = null;
             var (bossName, prefabName) = GetNextBoss();
             if (bossName == null)
             {
@@ -649,33 +693,54 @@ namespace EnvReporter
                 return;
             }
 
-            if (!FindClosestLocation(prefabName!, player.transform.position, out Vector3 altarPos))
+            _seekPendingBossName = bossName;
+            _seekPendingMessage  = message;
+            _seekPendingMult     = mult;
+            _seekPendingCtx      = ctx;
+
+            if (ZNet.instance != null && ZNet.instance.IsServer())
             {
-                Msg(ctx, $"Next boss: {bossName} — altar not yet in loaded zones.");
+                Vector3 altarPos = Vector3.zero;
+                if (ZoneSystem.instance != null &&
+                    ZoneSystem.instance.FindClosestLocation(prefabName!, player.transform.position, out var loc))
+                    altarPos = loc.m_position;
+                CompleteSeek(altarPos);
+            }
+            else
+            {
+                ZRoutedRpc.instance.InvokeRoutedRPC("Pilgrim_SeekAltarRequest",
+                    prefabName!, player.transform.position);
+            }
+        }
+
+        internal static void CompleteSeek(Vector3 altarPos)
+        {
+            var player = Player.m_localPlayer;
+            if (player == null) return;
+
+            string bossName = _seekPendingBossName ?? "???";
+            string message  = _seekPendingMessage  ?? "The wind stirs.";
+            float  mult     = _seekPendingMult;
+            var    ctx      = _seekPendingCtx;
+            _seekPendingBossName = null;
+            _seekPendingCtx      = null;
+
+            bool altarFound = altarPos != Vector3.zero;
+
+            BroadcastSeekTarget("boss", altarFound ? altarPos : Vector3.zero, SeekEnvDuration * mult, "LastLight", "Twilight_Clear");
+
+            if (!altarFound)
+            {
+                player.Message(MessageHud.MessageType.TopLeft, $"Seeking {bossName}... altar not yet discovered.");
                 return;
             }
 
             Vector3 playerPos = player.transform.position;
-            float dx   = altarPos.x - playerPos.x;
-            float dz   = altarPos.z - playerPos.z;
-            float dist = Mathf.Sqrt(dx * dx + dz * dz);
+            float dx    = altarPos.x - playerPos.x;
+            float dz    = altarPos.z - playerPos.z;
+            float dist  = Mathf.Sqrt(dx * dx + dz * dz);
             float angle = Mathf.Atan2(dx, dz) * Mathf.Rad2Deg;
             if (angle < 0) angle += 360f;
-
-            // Apply SE — look it up from ObjectDB so Valheim can clone it properly
-            var seTemplate = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == "SE_GuidingWind");
-            if (seTemplate == null) seTemplate = GuidingWindSE; // fallback to our reference
-            if (seTemplate != null)
-            {
-                seTemplate.m_ttl = SeekEnvDuration * mult;
-                player.GetSEMan().AddStatusEffect(seTemplate, true);
-                Log.LogInfo($"[EnvR] Applied SE: {seTemplate.name} ttl={seTemplate.m_ttl}");
-            }
-            else
-                Log.LogWarning("[EnvR] GuidingWindSE is null — ObjectDB patch may not have run");
-
-            SeekEnvExpiry = Time.time + SeekEnvDuration * mult;
-            BroadcastEnv("LastLight", "Twilight_Clear");
 
             if (ctx != null)
             {
@@ -689,7 +754,6 @@ namespace EnvReporter
             {
                 player.Message(MessageHud.MessageType.Center, message.Replace("{boss}", bossName));
             }
-
         }
 
         // ── Ping logic ──────────────────────────────────────────────────────
@@ -724,10 +788,14 @@ namespace EnvReporter
         // ── Dungeon seeker ritual ───────────────────────────────────────────
 
         static readonly string[] DungeonLocations = {
-            "Crypt2", "Crypt3", "Crypt4",     // burial chambers (Black Forest)
-            "SunkenCrypt",                    // sunken crypts (Swamp)
-            "MountainCave", "MountainCave02", // mountain caves
-            "InfectedMine",                   // infested mines (Mistlands)
+            "Crypt2", "Crypt3", "Crypt4",                       // burial chambers (Black Forest)
+            "TrollCave02",                                      // troll caves (Black Forest)
+            "SunkenCrypt4",                                     // sunken crypts (Swamp)
+            "MountainCave02",                                   // mountain caves (Mountain)
+            "Hildir_crypt", "Hildir_cave", "Hildir_plainsfortress", // Hildir dungeons
+            "Mistlands_DvergrTownEntrance1", "Mistlands_DvergrTownEntrance2", // infested mines (Mistlands)
+            "FortressRuins",                                    // Ashlands ruins
+            "MorgenHole1", "MorgenHole2", "MorgenHole3",       // morgen dens (Ashlands)
         };
 
         static readonly string[] TraderLocations = {
@@ -768,7 +836,8 @@ namespace EnvReporter
         static System.Reflection.MethodInfo? _isExploredMethod;
         static bool IsUnexplored(Vector3 pos)
         {
-            if (Minimap.instance == null) return true; // assume unexplored if minimap not ready
+            if (Minimap.instance == null) return true;
+
             _isExploredMethod ??= typeof(Minimap).GetMethod("IsExplored",
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
             if (_isExploredMethod == null) return true;
@@ -787,6 +856,79 @@ namespace EnvReporter
                 if (d < bestDist) { bestDist = d; bestPos = pos; bestName = loc; }
             }
             return bestDist < float.MaxValue;
+        }
+
+        // Gather ALL instances of the requested location prefabs from ZoneSystem
+        internal static Dictionary<string, List<Vector3>> GatherAllLocations(string[] prefabNames)
+        {
+            var results = new Dictionary<string, List<Vector3>>();
+            foreach (var n in prefabNames) results[n] = new List<Vector3>();
+            var zs = ZoneSystem.instance;
+            if (zs == null) return results;
+            var nameSet = new HashSet<string>(prefabNames);
+            foreach (var kvp in zs.m_locationInstances)
+            {
+                string prefab = kvp.Value.m_location.m_prefabName;
+                if (nameSet.Contains(prefab))
+                    results[prefab].Add(kvp.Value.m_position);
+            }
+            return results;
+        }
+
+        // Ask the server for all positions of a set of location prefabs, then invoke callback on client
+        internal static void RequestLocations(string[] prefabNames, Vector3 refPos, System.Action<Dictionary<string, List<Vector3>>> callback)
+        {
+            if (ZNet.instance != null && ZNet.instance.IsServer())
+            {
+                callback(GatherAllLocations(prefabNames));
+                return;
+            }
+            _pendingLocationsCallback = callback;
+            var pkg = new ZPackage();
+            pkg.Write(prefabNames.Length);
+            foreach (var n in prefabNames) pkg.Write(n);
+            ZRoutedRpc.instance.InvokeRoutedRPC("Pilgrim_SeekLocationsRequest", pkg);
+        }
+
+        internal static System.Action<Dictionary<string, List<Vector3>>>? _pendingLocationsCallback;
+
+        // Set the local seek target and env expiry for the given seek type
+        internal static void ApplySeekTargetLocal(string seekType, Vector3 target, float duration)
+        {
+            bool hasTarget = target != Vector3.zero;
+            if (seekType == "boss")
+            {
+                BossSeekTarget   = hasTarget ? target : (Vector3?)null;
+                SeekEnvExpiry    = Time.time + duration;
+            }
+            else
+            {
+                SeekOverrideTarget = hasTarget ? target : (Vector3?)null;
+                DungeonEnvExpiry   = Time.time + duration;
+            }
+            var seTemplate = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == "SE_GuidingWind") ?? GuidingWindSE;
+            if (seTemplate != null)
+            {
+                seTemplate.m_ttl = duration;
+                Player.m_localPlayer?.GetSEMan().AddStatusEffect(seTemplate, true);
+            }
+        }
+
+        // Broadcast a seek target to all peers so everyone gets guiding wind toward the same goal
+        internal static void BroadcastSeekTarget(string seekType, Vector3 target, float duration, string envName, string envFallback)
+        {
+            ApplySeekTargetLocal(seekType, target, duration);
+            SetDebugEnvSafe(envName, envFallback);
+            if (ZNet.instance == null) return;
+            foreach (var peer in ZNet.instance.GetPeers())
+            {
+                ZRoutedRpc.instance.InvokeRoutedRPC(peer.m_uid, "Pilgrim_SetEnv", envName, envFallback);
+                var pkg = new ZPackage();
+                pkg.Write(seekType);
+                pkg.Write(target.x); pkg.Write(target.y); pkg.Write(target.z);
+                pkg.Write(duration);
+                ZRoutedRpc.instance.InvokeRoutedRPC(peer.m_uid, "Pilgrim_SetSeekTarget", pkg);
+            }
         }
 
         static List<Minimap.PinData>? GetAllPins()
@@ -809,62 +951,69 @@ namespace EnvReporter
 
         internal static void ActivateDungeonSeek(Player player, string trophyPrefab, string message = "The veil parts — something stirs nearby.")
         {
-            if (!FindNearestUnexplored(DungeonLocations, player.transform.position, out Vector3 bestPos, out string bestName, out float bestDist))
+            var from = player.transform.position;
+            RequestLocations(DungeonLocations, from, results =>
             {
-                player.Message(MessageHud.MessageType.Center, "The spirits do not answer. No unexplored dungeon found.");
-                return;
-            }
+                // Find nearest unexplored across all returned positions
+                Vector3 bestPos = Vector3.zero; string bestName = ""; float bestDist = float.MaxValue;
+                foreach (var kv in results)
+                    foreach (var pos in kv.Value)
+                    {
+                        if (!IsUnexplored(pos)) continue;
+                        float d = Vector3.Distance(from, pos);
+                        if (d < bestDist) { bestDist = d; bestPos = pos; bestName = kv.Key; }
+                    }
 
-            SeekOverrideTarget = bestPos;
-            DungeonEnvExpiry = Time.time + DungeonEnvDuration;
-            BroadcastEnv("VoidWhisper", "ThunderStorm");
+                var p = Player.m_localPlayer;
+                if (p == null) return;
+                if (bestDist == float.MaxValue)
+                {
+                    p.Message(MessageHud.MessageType.Center, "The spirits do not answer. No unexplored dungeon found.");
+                    return;
+                }
 
-            var seTemplate = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == "SE_GuidingWind") ?? GuidingWindSE;
-            if (seTemplate != null) player.GetSEMan().AddStatusEffect(seTemplate, true);
-
-            player.Message(MessageHud.MessageType.Center, message);
-            Log.LogInfo($"[EnvR] Dungeon seek: {bestName} at {bestDist:F0}m");
+                BroadcastSeekTarget("dungeon", bestPos, DungeonEnvDuration, "VoidWhisper", "ThunderStorm");
+                p.Message(MessageHud.MessageType.Center, message);
+                Log.LogInfo($"[EnvR] Dungeon seek: {bestName} at {bestDist:F0}m");
+            });
         }
 
         internal static void ActivateTraderSeek(Player player)
         {
-            // For traders, "discovered" = minimap pin with the trader's name exists.
-            // Don't use IsUnexplored — the zone center may be far from where the trader
-            // actually wandered, so map exploration around the zone center is unreliable.
-            var bestPos = Vector3.zero;
-            var bestName = "";
-            float bestDist = float.MaxValue;
-
-            float bestUnknownDist = float.MaxValue, bestKnownDist = float.MaxValue;
-            Vector3 bestUnknownPos = Vector3.zero, bestKnownPos = Vector3.zero;
-            string bestUnknownName = "", bestKnownName = "";
-
-            foreach (var loc in TraderLocations)
+            var from = player.transform.position;
+            RequestLocations(TraderLocations, from, results =>
             {
-                if (!FindClosestLocation(loc, player.transform.position, out Vector3 pos)) continue;
-                float d = Vector3.Distance(player.transform.position, pos);
-                if (!HasMetTrader(loc)) { if (d < bestUnknownDist) { bestUnknownDist = d; bestUnknownPos = pos; bestUnknownName = loc; } }
-                else                    { if (d < bestKnownDist)   { bestKnownDist = d;   bestKnownPos = pos;   bestKnownName = loc; } }
-            }
+                float bestUnknownDist = float.MaxValue, bestKnownDist = float.MaxValue;
+                Vector3 bestUnknownPos = Vector3.zero, bestKnownPos = Vector3.zero;
+                string bestUnknownName = "", bestKnownName = "";
 
-            // Prefer nearest unmet; if all met fall back to nearest trader regardless of distance
-            bestPos  = bestUnknownName != "" ? bestUnknownPos  : bestKnownPos;
-            bestName = bestUnknownName != "" ? bestUnknownName : bestKnownName;
-            bestDist = bestUnknownName != "" ? bestUnknownDist : bestKnownDist;
+                foreach (var kv in results)
+                    foreach (var pos in kv.Value)
+                    {
+                        float d = Vector3.Distance(from, pos);
+                        if (!HasMetTrader(kv.Key)) { if (d < bestUnknownDist) { bestUnknownDist = d; bestUnknownPos = pos; bestUnknownName = kv.Key; } }
+                        else                        { if (d < bestKnownDist)   { bestKnownDist = d;   bestKnownPos = pos;   bestKnownName = kv.Key; } }
+                    }
 
-            if (bestDist == float.MaxValue)
-            {
-                player.Message(MessageHud.MessageType.Center, "The merchants are beyond reach.");
-                return;
-            }
+                Vector3 bestPos  = bestUnknownName != "" ? bestUnknownPos  : bestKnownPos;
+                string  bestName = bestUnknownName != "" ? bestUnknownName : bestKnownName;
+                float   bestDist = bestUnknownName != "" ? bestUnknownDist : bestKnownDist;
 
-            player.Message(MessageHud.MessageType.Center, Cfg.Rituals.Items.GetValueOrDefault("seek_trader")?.Message ?? "Gold calls to gold...");
-            Log.LogInfo($"[EnvR] Trader seek: {bestName} at {bestDist:F0}m");
+                var p = Player.m_localPlayer;
+                if (p == null) return;
+                if (bestDist == float.MaxValue)
+                {
+                    p.Message(MessageHud.MessageType.Center, "The merchants are beyond reach.");
+                    return;
+                }
 
-            var dir = (bestPos - player.transform.position);
-            dir.y = 0f;
-            if (dir != Vector3.zero && Scheduler != null)
-                BroadcastBird(dir.normalized);
+                p.Message(MessageHud.MessageType.Center, Cfg.Rituals.Items.GetValueOrDefault("seek_trader")?.Message ?? "Gold calls to gold...");
+                Log.LogInfo($"[EnvR] Trader seek: {bestName} at {bestDist:F0}m");
+
+                var dir = bestPos - from; dir.y = 0f;
+                if (dir != Vector3.zero && Scheduler != null)
+                    BroadcastBird(dir.normalized);
+            });
         }
 
         // ── Kindle ritual ───────────────────────────────────────────────────
@@ -1084,62 +1233,56 @@ namespace EnvReporter
             player.Message(MessageHud.MessageType.TopLeft, "You return to mortal scale.");
         }
 
-        // ── Flaming sword ritual ────────────────────────────────────────────
+        // ── Legendary weapon rituals ─────────────────────────────────────────
 
-        internal static void ActivateFlamingSword(Player player, string message = "Dyrnwyn answers. Let it burn.", float mult = 1f)
+        internal static void ActivateLegendaryWeapon(LegendaryDef def, Player player, string message, float mult = 1f)
         {
-            // Deactivate any existing imbue before applying a new one
-            if (FlamingSwordExpiry > 0f) DeactivateFlamingSword(player, immediate: true);
+            if (FlamingSwordExpiry > 0f) DeactivateLegendaryWeapon(player, immediate: true);
 
             var rf2 = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
             var currentRight = typeof(Humanoid).GetField("m_rightItem", rf2)?.GetValue(player) as ItemDrop.ItemData;
 
-            if (currentRight?.m_shared?.m_skillType != Skills.SkillType.Swords)
+            if (currentRight?.m_shared?.m_skillType != def.SkillType)
             {
-                player.Message(MessageHud.MessageType.Center, "You must hold a sword to summon Dyrnwyn.");
+                player.Message(MessageHud.MessageType.Center, $"You must hold a {def.SkillLabel} to answer the call.");
                 return;
             }
 
-            // Pull the held weapon out of the inventory list (kept by reference) to free its slot
             if (currentRight != null)
             {
                 player.UnequipItem(currentRight);
                 player.GetInventory().RemoveItem(currentRight);
             }
 
-            var newItem = player.GetInventory().AddItem(FlamingSwordPrefab, 1, 1, 0, 0L, "");
+            var newItem = player.GetInventory().AddItem(def.Prefab, 1, 1, 0, 0L, "");
             if (newItem == null)
             {
-                player.Message(MessageHud.MessageType.Center, "No room in your pack for the flame.");
+                player.Message(MessageHud.MessageType.Center, "No room in your pack.");
                 if (currentRight != null) { player.GetInventory().AddItem(currentRight); player.EquipItem(currentRight); }
                 return;
             }
 
-            _origRightItem    = currentRight;
-            _flamingSwordItem = newItem;
+            _activeLegendaryDef  = def;
+            _legendaryOrigItem   = currentRight;
+            _legendaryActiveItem = newItem;
             player.EquipItem(newItem);
             SpawnSmokePuff(player);
 
-            float duration = (Cfg.Rituals.Items.GetValueOrDefault("flaming_sword")?.Duration ?? 60f) * mult;
+            float duration = (Cfg.Rituals.Items.GetValueOrDefault(def.Key)?.Duration ?? 60f) * mult;
             FlamingSwordExpiry = Time.time + duration;
 
-            var se = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == "SE_FlamingSword") ?? FlamingSwordSE;
+            var se = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == "SE_LegendaryWeapon") ?? LegendarySE;
             if (se != null) { se.m_ttl = duration; player.GetSEMan().AddStatusEffect(se, true); }
 
             TryPlayEmote(player, "cheer");
 
-            // One-shot lightning strike on the sword (right-hand attach point), delayed to land on the cheer's peak
-            Transform? handPtCapture = player.transform.Find("Visual/Armature/Hips/Spine/Spine1/Spine2/RightShoulder/RightArm/RightForeArm/RightHand/RightHandMiddle1")
-                                    ?? player.transform;
-            Vector3 strikeCapture = handPtCapture.position + Vector3.up * 0.5f + player.transform.forward * 0.5f;
-            Scheduler?.RunDelayed(0.5f, () =>
-            {
-                BroadcastVfx(strikeCapture, "fx_chainlightning_hit", 4f);
-                Log.LogInfo("[Pilgrim] FlamingSword VFX: fx_chainlightning_hit");
-            });
+            Transform? handPt = player.transform.Find("Visual/Armature/Hips/Spine/Spine1/Spine2/RightShoulder/RightArm/RightForeArm/RightHand/RightHandMiddle1")
+                             ?? player.transform;
+            Vector3 strike = handPt.position + Vector3.up * 0.5f + player.transform.forward * 0.5f;
+            Scheduler?.RunDelayed(0.5f, () => BroadcastVfx(strike, "fx_chainlightning_hit", 4f));
 
             player.Message(MessageHud.MessageType.Center, message);
-            Log.LogInfo($"[Pilgrim] FlamingSword: swapped in {FlamingSwordPrefab} for {duration}s");
+            Log.LogInfo($"[Pilgrim] Legendary: swapped in {def.Prefab} for {duration}s");
         }
 
         static void TryPlayEmote(Player player, string emoteName)
@@ -1155,35 +1298,33 @@ namespace EnvReporter
             }
         }
 
-        internal static void DeactivateFlamingSword(Player player, bool immediate = false)
+        internal static void DeactivateLegendaryWeapon(Player player, bool immediate = false)
         {
             FlamingSwordExpiry = 0f;
-
             BroadcastVfx(player.transform.position, "fx_fireskeleton_nova", 0f);
-
-            if (immediate)
-                FinishSwordSwapBack(player);
-            else
-                Scheduler?.RunDelayed(0.5f, () => FinishSwordSwapBack(player));
+            if (immediate) FinishLegendarySwapBack(player);
+            else Scheduler?.RunDelayed(0.5f, () => FinishLegendarySwapBack(player));
         }
 
-        static void FinishSwordSwapBack(Player player)
+        static void FinishLegendarySwapBack(Player player)
         {
-            if (_flamingSwordItem != null)
+            if (_legendaryActiveItem != null)
             {
-                player.UnequipItem(_flamingSwordItem);
-                player.GetInventory().RemoveItem(_flamingSwordItem);
-                if (_origRightItem != null)
+                player.UnequipItem(_legendaryActiveItem);
+                player.GetInventory().RemoveItem(_legendaryActiveItem);
+                if (_legendaryOrigItem != null)
                 {
-                    player.GetInventory().AddItem(_origRightItem);
-                    player.EquipItem(_origRightItem);
+                    player.GetInventory().AddItem(_legendaryOrigItem);
+                    player.EquipItem(_legendaryOrigItem);
                 }
-                _flamingSwordItem = null;
-                _origRightItem    = null;
+                _legendaryActiveItem = null;
+                _legendaryOrigItem   = null;
             }
             SpawnSmokePuff(player);
-            player.GetSEMan().RemoveStatusEffect(FlamingSwordSE?.NameHash() ?? 0);
-            player.Message(MessageHud.MessageType.TopLeft, "The flame fades.");
+            player.GetSEMan().RemoveStatusEffect(LegendarySE?.NameHash() ?? 0);
+            string deactivateMsg = Cfg.Rituals.Items.GetValueOrDefault(_activeLegendaryDef.Key)?.Message
+                                   ?? _activeLegendaryDef.DefaultDeactivateMsg;
+            player.Message(MessageHud.MessageType.TopLeft, deactivateMsg);
         }
 
         internal static bool HasAnyActiveRitual(Player player)
@@ -1208,7 +1349,7 @@ namespace EnvReporter
 
             // Rituals with dedicated deactivation paths
             if (GiantExpiry > 0f)        DeactivateGiant(player);
-            if (FlamingSwordExpiry > 0f) DeactivateFlamingSword(player, immediate: true);
+            if (FlamingSwordExpiry > 0f) DeactivateLegendaryWeapon(player, immediate: true);
 
             // Feather: remove SE explicitly (expiry only gates our damage patch)
             if (FeatherRitualExpiry > 0f)
@@ -1233,6 +1374,7 @@ namespace EnvReporter
             if (hadSeek)
             {
                 SeekEnvExpiry = 0f;
+                BossSeekTarget = null;
                 player.GetSEMan().RemoveStatusEffect(GuidingWindSE?.NameHash() ?? 0);
             }
 
@@ -1301,13 +1443,13 @@ namespace EnvReporter
 
         static readonly (string boss, string prefab)[] BossChain =
         {
-            ("Eikthyr",    "Eikthyrpower"),
+            ("Eikthyr",    "Eikthyrnir"),
             ("The Elder",  "GDKing"),
             ("Bonemass",   "Bonemass"),
             ("Moder",      "Dragonqueen"),
             ("Yagluth",    "GoblinKing"),
-            ("The Queen",  "SeekerQueen"),
-            ("Fader",      "Fader"),
+            ("The Queen",  "Mistlands_DvergrBossEntrance1"),
+            ("Fader",      "FaderLocation"),
             // TODO: DeepNorth boss — prefab name unknown, add when content ships
         };
 
@@ -1528,8 +1670,14 @@ namespace EnvReporter
                     "seek_player"   => "Flint",
                     "kindle"        => "Resin",
                     "giant"         => "Ymir Flesh",
-                    "flaming_sword" => "Surtling Core",
-                    _               => key,
+                    "flaming_sword"  => "Surtling Core",
+                    "jotun_bane"     => "Ooze",
+                    "krom"           => "Copper",
+                    "slayer"         => "Iron",
+                    "skull_splittur" => "Blood Bag",
+                    "himminafl"      => "Tin",
+                    "mistwalker"     => "Crystal",
+                    _                => key,
                 };
                 rows.Append($"\n  <color=yellow>{itemLabel}</color> — {r.HoverText}");
             }
@@ -1550,7 +1698,7 @@ namespace EnvReporter
                 ? $" <color=red>({Plugin.RitualCooldownRemaining:F0}s)</color>" : "";
             string countStr = $" <color={(knownKeys.Count < allKeys.Count ? "yellow" : "green")}>{knownKeys.Count}/{allKeys.Count}</color>";
 
-            __result += $"\n<size=14><color=orange>── Offerings{countStr}{cdStr} ──</color>";
+            __result += $"\n<size=12><color=orange>── Offerings{countStr}{cdStr} ──</color>";
             if (Plugin.ShowHintsEnabled)
             {
                 __result += rows.ToString();
@@ -1610,7 +1758,7 @@ namespace EnvReporter
                          || (prefab == Plugin.TameFood       && RitualEnabled("tame_flock"))
                          || (prefab == Plugin.MeadFood       && RitualEnabled("mead_ripen"))
                          || (prefab == Plugin.GiantFood       && RitualEnabled("giant"))
-                         || (prefab == Plugin.FlamingSwordFood && RitualEnabled("flaming_sword"));
+                         || (Plugin.LegendaryIngredientMatch(prefab) is string lk && RitualEnabled(lk));
             if (!isRitual) return true;
 
             // Global cooldown check
@@ -1700,13 +1848,14 @@ namespace EnvReporter
                 if (RitualEnabled("giant"))
                 { Consume(); Plugin.ActivateGiant(__instance, RitualMsg("giant", "The mountain answers. You are vast."), ritualMult); return false; }
             }
-            if (prefab == Plugin.FlamingSwordFood && RitualEnabled("flaming_sword"))
+            if (Plugin.LegendaryIngredientMatch(prefab) is string legendaryKey && RitualEnabled(legendaryKey))
             {
+                var def = System.Array.Find(Plugin.LegendaryDefs, d => d.Key == legendaryKey);
                 var rf3 = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
                 var held = typeof(Humanoid).GetField("m_rightItem", rf3)?.GetValue(__instance) as ItemDrop.ItemData;
-                if (held?.m_shared?.m_skillType != Skills.SkillType.Swords)
-                { __instance.Message(MessageHud.MessageType.Center, "You must hold a sword to summon Dyrnwyn."); return false; }
-                Consume(); Plugin.ActivateFlamingSword(__instance, RitualMsg("flaming_sword", "Dyrnwyn answers. Let it burn."), ritualMult); return false;
+                if (held?.m_shared?.m_skillType != def.SkillType)
+                { __instance.Message(MessageHud.MessageType.Center, $"You must hold a {def.SkillLabel} to answer the call."); return false; }
+                Consume(); Plugin.ActivateLegendaryWeapon(def, __instance, RitualMsg(legendaryKey, def.DefaultActivateMsg), ritualMult); return false;
             }
 
             // Catch-all: suppress vanilla for any ritual item so we never see game rejection messages
@@ -1855,7 +2004,7 @@ namespace EnvReporter
             _windTimer -= dt;
             if (_windTimer <= 0f)
             {
-                _windTimer = 30f;
+                _windTimer = 3f;
                 RefreshWind();
             }
         }
@@ -1900,14 +2049,13 @@ namespace EnvReporter
                 target = Plugin.SeekOverrideTarget.Value;
                 Plugin.BroadcastEnv("VoidWhisper", "ThunderStorm");
             }
-            else
+            else if (Plugin.BossSeekTarget.HasValue)
             {
-                // Boss seek mode
-                var (_, prefab) = Plugin.GetNextBoss();
-                if (prefab == null) return;
-                if (!Plugin.FindClosestLocation(prefab, player.transform.position, out target)) return;
+                // Boss seek mode — use cached position from CompleteSeek RPC response
+                target = Plugin.BossSeekTarget.Value;
                 Plugin.BroadcastEnv("LastLight", "Twilight_Clear");
             }
+            else return;
 
             Vector3 pos = player.transform.position;
             float angle = Mathf.Atan2(target.x - pos.x, target.z - pos.z) * Mathf.Rad2Deg;
@@ -1961,15 +2109,15 @@ namespace EnvReporter
             __instance.m_StatusEffects.Add(giant);
             Plugin.GiantSE = giant;
 
-            var dyrnwyn = ScriptableObject.CreateInstance<SE_FlamingSword>();
-            dyrnwyn.name           = "SE_FlamingSword";
-            dyrnwyn.m_name         = "Dyrnwyn";
+            var dyrnwyn = ScriptableObject.CreateInstance<SE_LegendaryWeapon>();
+            dyrnwyn.name           = "SE_LegendaryWeapon";
+            dyrnwyn.m_name         = "Legendary Weapon";
             dyrnwyn.m_tooltip      = "A blade of fire, summoned and bound to flicker out in time.";
             dyrnwyn.m_ttl          = 60f;
             dyrnwyn.m_startMessage = "";
             dyrnwyn.m_stopMessage  = "";
             __instance.m_StatusEffects.Add(dyrnwyn);
-            Plugin.FlamingSwordSE = dyrnwyn;
+            Plugin.LegendarySE = dyrnwyn;
         }
     }
 
@@ -2014,18 +2162,15 @@ namespace EnvReporter
         }
     }
 
-    public class SE_FlamingSword : StatusEffect
+    public class SE_LegendaryWeapon : StatusEffect
     {
         public override void Setup(Character character)
         {
             base.Setup(character);
-            var prefab = ZNetScene.instance?.GetPrefab(Plugin.FlamingSwordPrefab);
+            // Try to use the spawned weapon's icon
+            var prefab = ZNetScene.instance?.GetPrefab(Plugin._activeLegendaryDef.Prefab);
             var shared = prefab?.GetComponent<ItemDrop>()?.m_itemData?.m_shared;
-            if (shared?.m_icons != null && shared.m_icons.Length > 0)
-            {
-                m_icon = shared.m_icons[0];
-                return;
-            }
+            if (shared?.m_icons != null && shared.m_icons.Length > 0) { m_icon = shared.m_icons[0]; return; }
             string[] candidates = { "SE_Burning", "GP_Eikthyr", "Rested" };
             foreach (var c in candidates)
             {
@@ -2703,6 +2848,7 @@ namespace EnvReporter
         }
     }
 
+    [HarmonyPatch(typeof(ZNet), "Awake")]
     static class GameStartRpcPatch
     {
         static void Postfix()
@@ -2722,6 +2868,68 @@ namespace EnvReporter
 
             ZRoutedRpc.instance.Register<float, float>("Pilgrim_SetWind", (_, angle, intensity) =>
                 Plugin.ApplyWind(angle, intensity));
+
+            // Server-side: look up altar position and reply to requesting peer
+            ZRoutedRpc.instance.Register<string, Vector3>("Pilgrim_SeekAltarRequest", (senderPeer, prefabName, refPos) =>
+            {
+                Vector3 result = Vector3.zero;
+                if (ZoneSystem.instance != null &&
+                    ZoneSystem.instance.FindClosestLocation(prefabName, refPos, out var loc))
+                    result = loc.m_position;
+                ZRoutedRpc.instance.InvokeRoutedRPC(senderPeer, "Pilgrim_SeekAltarResponse", result);
+            });
+
+            // Client-side: receive altar position and complete the seek ritual
+            ZRoutedRpc.instance.Register<Vector3>("Pilgrim_SeekAltarResponse", (_, altarPos) =>
+                Plugin.CompleteSeek(altarPos));
+
+            // Server-side: return ALL instances of requested location prefabs
+            ZRoutedRpc.instance.Register<ZPackage>("Pilgrim_SeekLocationsRequest", (senderPeer, pkg) =>
+            {
+                int count = pkg.ReadInt();
+                string[] names = new string[count];
+                for (int i = 0; i < count; i++) names[i] = pkg.ReadString();
+
+                var allLocs = Plugin.GatherAllLocations(names);
+                int totalPairs = 0;
+                foreach (var kv in allLocs) totalPairs += kv.Value.Count;
+
+                var reply = new ZPackage();
+                reply.Write(totalPairs);
+                foreach (var kv in allLocs)
+                    foreach (var pos in kv.Value)
+                    {
+                        reply.Write(kv.Key);
+                        reply.Write(pos.x); reply.Write(pos.y); reply.Write(pos.z);
+                    }
+                ZRoutedRpc.instance.InvokeRoutedRPC(senderPeer, "Pilgrim_SeekLocationsResponse", reply);
+            });
+
+            // Client-side: unpack flat (name, pos) pairs and fire callback
+            ZRoutedRpc.instance.Register<ZPackage>("Pilgrim_SeekLocationsResponse", (_, pkg) =>
+            {
+                int totalPairs = pkg.ReadInt();
+                var results = new Dictionary<string, List<Vector3>>();
+                for (int i = 0; i < totalPairs; i++)
+                {
+                    string name = pkg.ReadString();
+                    var pos = new Vector3(pkg.ReadSingle(), pkg.ReadSingle(), pkg.ReadSingle());
+                    if (!results.TryGetValue(name, out var list))
+                        results[name] = list = new List<Vector3>();
+                    list.Add(pos);
+                }
+                Plugin._pendingLocationsCallback?.Invoke(results);
+                Plugin._pendingLocationsCallback = null;
+            });
+
+            // Client-side: receive a seek target from the ritual caller and apply locally
+            ZRoutedRpc.instance.Register<ZPackage>("Pilgrim_SetSeekTarget", (_, pkg) =>
+            {
+                string seekType = pkg.ReadString();
+                var target = new Vector3(pkg.ReadSingle(), pkg.ReadSingle(), pkg.ReadSingle());
+                float duration = pkg.ReadSingle();
+                Plugin.ApplySeekTargetLocal(seekType, target, duration);
+            });
         }
     }
 
@@ -3186,7 +3394,7 @@ namespace EnvReporter
             if (Plugin.FlamingSwordExpiry > 0f && Time.time >= Plugin.FlamingSwordExpiry)
             {
                 var fp = Player.m_localPlayer;
-                if (fp != null) Plugin.DeactivateFlamingSword(fp);
+                if (fp != null) Plugin.DeactivateLegendaryWeapon(fp);
                 else Plugin.FlamingSwordExpiry = 0f;
             }
 
@@ -3602,7 +3810,13 @@ namespace EnvReporter
                     ["tame_flock"]    = new RitualItemConfig { Enabled = true, Item = "BoneFragments", HoverText = "Tame the flock",          Message = "The bones remember loyalty. Sleep, and your flock will answer." },
                     ["mead_ripen"]    = new RitualItemConfig { Enabled = true, Item = "Barley",         HoverText = "Ripen the mead",           Message = "The grain remembers the harvest. Sleep, and your mead will answer." },
                     ["giant"]         = new RitualItemConfig { Enabled = true, Item = "YmirRemains",   HoverText = "Become the mountain",      Message = "The mountain answers. You are vast.", Duration = 60f },
-                    ["flaming_sword"] = new RitualItemConfig { Enabled = true, Item = "SurtlingCore", HoverText = "Summon Dyrnwyn", Message = "Dyrnwyn answers. Let it burn.", Duration = 60f },
+                    ["flaming_sword"]  = new RitualItemConfig { Enabled = true, Item = "SurtlingCore", HoverText = "Summon Dyrnwyn",         Message = "Dyrnwyn answers. Let it burn.",       Duration = 60f },
+                    ["jotun_bane"]     = new RitualItemConfig { Enabled = true, Item = "Ooze",         HoverText = "Summon Jotun Bane",       Message = "Jotun Bane answers the call.",        Duration = 60f },
+                    ["krom"]           = new RitualItemConfig { Enabled = true, Item = "Copper",       HoverText = "Summon Krom",             Message = "Krom rises from the deep.",           Duration = 60f },
+                    ["slayer"]         = new RitualItemConfig { Enabled = true, Item = "Iron",         HoverText = "Summon Slayer",           Message = "Slayer hungers.",                     Duration = 60f },
+                    ["skull_splittur"] = new RitualItemConfig { Enabled = true, Item = "Bloodbag",     HoverText = "Summon Skull Splittur",   Message = "Skull Splittur demands a reckoning.", Duration = 60f },
+                    ["himminafl"]      = new RitualItemConfig { Enabled = true, Item = "Tin",          HoverText = "Summon Himminafl",        Message = "Himminafl crackles with thunder.",    Duration = 60f },
+                    ["mistwalker"]     = new RitualItemConfig { Enabled = true, Item = "Crystal",      HoverText = "Summon Mistwalker",       Message = "Mistwalker parts the veil.",          Duration = 60f },
                 },
             },
         };

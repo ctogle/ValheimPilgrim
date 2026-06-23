@@ -18,8 +18,15 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
    - Seek a fellow pilgrim
    - Kindle nearby fires
    - Tame the flock
+   - Ripen the mead
    - Become the mountain
    - Summon Dyrnwyn
+   - Summon Jotun Bane
+   - Summon Krom
+   - Summon Slayer
+   - Summon Skull Splittur
+   - Summon Himminafl
+   - Summon Mistwalker
 
 ## Requirements
 
