@@ -11,15 +11,18 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.3.2")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.3.3")]
     public class Plugin : BaseUnityPlugin
     {
+        internal static Plugin plugin = null!;
         internal static BepInEx.Logging.ManualLogSource Log = null!;
         internal static EnvScheduler?  Scheduler;
         internal static SE_GuidingWind? GuidingWindSE;
         internal static SE_WaterWalk?   WaterWalkSE;
         internal static SE_Giant?       GiantSE;
         internal static SE_LegendaryWeapon? LegendarySE;
+        internal static SE_Shield?      ShieldBubbleSE;
+        internal static Material?       WardSphereMat;   // cached from SE_Shield Sphere on first use
 
         // ── Config ──────────────────────────────────────────────────────────
         internal static PilgrimConfig Cfg = PilgrimConfig.Default();
@@ -87,6 +90,8 @@ namespace EnvReporter
         internal static string TameFood     => Cfg.Rituals.Items.GetValueOrDefault("tame_flock")?.Item    ?? "BoneFragments";
         internal static string MeadFood      => Cfg.Rituals.Items.GetValueOrDefault("mead_ripen")?.Item   ?? "Barley";
         internal static string GiantFood        => Cfg.Rituals.Items.GetValueOrDefault("giant")?.Item          ?? "YmirRemains";
+        internal static string WardFood         => Cfg.Rituals.Items.GetValueOrDefault("ward_bubble")?.Item    ?? "Ruby";
+        internal static string CampfireWardFood => Cfg.Rituals.Items.GetValueOrDefault("campfire_ward")?.Item ?? "AmberPearl";
         internal static string? LegendaryIngredientMatch(string prefab)
         {
             foreach (var def in LegendaryDefs)
@@ -142,6 +147,8 @@ namespace EnvReporter
             ("Bloodbag",      false, "skull_splittur",  "Blood Bag"),
             ("Tin",           false, "himminafl",       "Tin"),
             ("Crystal",       false, "mistwalker",      "Crystal"),
+            ("Ruby",          false, "ward_bubble",     "Ruby"),
+            ("AmberPearl",    false, "campfire_ward",   "Amber Pearl"),
         };
 
         internal struct LegendaryDef
@@ -209,6 +216,8 @@ namespace EnvReporter
         internal static float HomeEnvExpiry        = 0f;
         internal static bool  GrowthBlessingActive = false;
         internal static bool  ShowHintsEnabled     = true;
+        internal static int   HintPage             = 0;
+        internal const  int   HintPageSize         = 15;
         internal static bool  TameBlessingActive   = false;
         internal static bool  MeadBlessingActive   = false;
         internal static float FlamingSwordExpiry     = 0f; // alias kept for expiry-check sites
@@ -217,6 +226,10 @@ namespace EnvReporter
         static ItemDrop.ItemData? _legendaryActiveItem = null;
         static ItemDrop.ItemData? _legendaryOrigItem   = null;
         internal static float GiantExpiry          = 0f;
+        internal static float ShieldBubbleExpiry   = 0f;
+        internal static float CampfireWardExpiry   = 0f;
+        internal static GameObject? ActiveCampfireWard     = null;
+        internal static Renderer?   ActiveCampfireWardRend = null;
         internal static float GiantTargetScale     = 1f;
         internal const  float GiantCarryBonus      = 300f;
         internal const  float GiantScale           = 3f;
@@ -249,6 +262,7 @@ namespace EnvReporter
 
         void Awake()
         {
+            plugin = this;
             Log = Logger;
             LoadConfig();
             _cfgWatcher = new FileSystemWatcher(Paths.ConfigPath, "Pilgrim.yaml")
@@ -559,6 +573,273 @@ namespace EnvReporter
                     player.m_customData.Remove($"ath_known_{key}");
                 }
                 args.Context.AddString(target == "all" ? "All rituals forgotten." : $"Forgotten: {target}");
+            });
+
+            // ── ath_inspect ─────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("ath_inspect",
+                "ath_inspect — identify the nearest structure and report its composition", args =>
+            {
+                var player = Player.m_localPlayer;
+                if (player == null) return;
+
+                // Seed: find nearest player-built piece within 5m (must have Piece component)
+                var seed = Physics.OverlapSphere(player.transform.position, 5f)
+                    .Select(c => c.GetComponentInParent<WearNTear>())
+                    .Where(w => w != null && w.GetComponent<Piece>() != null)
+                    .OrderBy(w => Vector3.Distance(w.transform.position, player.transform.position))
+                    .FirstOrDefault();
+
+                if (seed == null)
+                {
+                    args.Context.AddString("[inspect] No structure within 5m.");
+                    return;
+                }
+
+                // BFS flood-fill by proximity (2m step radius per piece)
+                const float stepRadius = 5f;
+                var visited   = new HashSet<WearNTear>();
+                var queue     = new Queue<WearNTear>();
+                visited.Add(seed);
+                queue.Enqueue(seed);
+
+                while (queue.Count > 0)
+                {
+                    var current = queue.Dequeue();
+                    foreach (var col in Physics.OverlapSphere(current.transform.position, stepRadius))
+                    {
+                        var neighbor = col.GetComponentInParent<WearNTear>();
+                        if (neighbor != null && neighbor.GetComponent<Piece>() != null && visited.Add(neighbor))
+                            queue.Enqueue(neighbor);
+                    }
+                }
+
+                // Tally pieces
+                var counts        = new SortedDictionary<string, int>();
+                var materialTotals = new SortedDictionary<string, int>();
+                var masterBounds  = new Bounds();
+                bool boundsInit   = false;
+                int groundCount    = 0;
+                float totalHealth  = 0f;
+                int roofCount      = 0;
+                float minSupport = float.MaxValue;
+                float maxSupport = float.MinValue;
+                int fullSupport  = 0;
+                var supportField    = typeof(WearNTear).GetField("m_support", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var getMaxSupport  = typeof(WearNTear).GetMethod("GetMaxSupport", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                int terrainMask    = LayerMask.GetMask("terrain");
+
+                foreach (var w in visited)
+                {
+                    string nameLower = w.gameObject.name.Replace("(Clone)", "").Trim().ToLower();
+                    string display   = w.gameObject.name.Replace("(Clone)", "").Trim();
+                    counts.TryGetValue(display, out int c);
+                    counts[display] = c + 1;
+
+                    // Bounds via non-trigger colliders only (triggers are heat/light radii, not geometry)
+                    foreach (var col in w.GetComponentsInChildren<Collider>())
+                    {
+                        if (col.isTrigger) continue;
+                        var b = col.bounds;
+                        if (!boundsInit) { masterBounds = b; boundsInit = true; }
+                        else masterBounds.Encapsulate(b);
+                    }
+
+                    float py = w.transform.position.y;
+                    // Raycast downward to terrain only — GetSolidHeight includes structures and lies
+                    float pieceGround = py;
+                    var rayOrigin = new Vector3(w.transform.position.x, py + 50f, w.transform.position.z);
+                    if (Physics.Raycast(rayOrigin, Vector3.down, out var terrainHit, 200f, terrainMask))
+                        pieceGround = terrainHit.point.y;
+                    if (py <= pieceGround + 1f) groundCount++;
+                    if (nameLower.Contains("roof")) roofCount++;
+
+                    // Structural support
+                    if (supportField != null)
+                    {
+                        float sv  = (float)(supportField.GetValue(w) ?? 0f);
+                        float max = getMaxSupport != null ? (float)(getMaxSupport.Invoke(w, null) ?? sv) : sv;
+                        if (sv < minSupport) minSupport = sv;
+                        if (sv > maxSupport) maxSupport = sv;
+                        if (max > 0f && sv >= max * 0.99f) fullSupport++;
+                    }
+
+                    // Health
+                    var zv = w.GetComponent<ZNetView>();
+                    if (zv != null) totalHealth += zv.GetZDO()?.GetFloat(ZDOVars.s_health, w.m_health) / w.m_health ?? 1f;
+                    else totalHealth += 1f;
+
+                    // Material requirements from Piece.m_resources
+                    var piece = w.GetComponent<Piece>();
+                    if (piece?.m_resources != null)
+                        foreach (var req in piece.m_resources)
+                            if (req?.m_resItem?.m_itemData?.m_shared?.m_name is string matName && req.m_amount > 0)
+                            {
+                                string label = req.m_resItem.gameObject.name.Replace("(Clone)", "").Trim();
+                                materialTotals.TryGetValue(label, out int mc);
+                                materialTotals[label] = mc + req.m_amount;
+                            }
+                }
+
+                // Max comfort from piece components
+                int maxComfort = 0;
+                foreach (var w in visited)
+                {
+                    var piece = w.GetComponent<Piece>();
+                    if (piece != null && piece.m_comfort > maxComfort)
+                        maxComfort = piece.m_comfort;
+                }
+
+                int total        = visited.Count;
+                float height     = boundsInit ? masterBounds.size.y : 0f;
+                float footprintX = boundsInit ? masterBounds.size.x : 0f;
+                float footprintZ = boundsInit ? masterBounds.size.z : 0f;
+                float diagonal   = Mathf.Sqrt(footprintX * footprintX + footprintZ * footprintZ);
+                string shape     = diagonal < 0.1f ? "point" : height / diagonal > 1.5f ? "tower" : height / diagonal > 0.6f ? "balanced" : "hall";
+                float avgHealth  = total > 0 ? totalHealth / total * 100f : 0f;
+
+                // Shelter fraction — sample grid across footprint at ground level
+                int sheltered = 0, sampleTotal = 0;
+                if (boundsInit)
+                {
+                    float step = 1f;
+                    // Sample at 1m above ground level (not bounding box bottom, which may be below terrain)
+                    var center = masterBounds.center;
+                    float groundAtCenter = ZoneSystem.instance?.GetSolidHeight(new Vector3(center.x, center.y, center.z)) ?? masterBounds.min.y;
+                    float sampleY = groundAtCenter + 1f;
+                    for (float sx = masterBounds.min.x; sx <= masterBounds.max.x; sx += step)
+                    for (float sz = masterBounds.min.z; sz <= masterBounds.max.z; sz += step)
+                    {
+                        var samplePos = new Vector3(sx, sampleY, sz);
+                        Cover.GetCoverForPoint(samplePos, out float coverPct, out bool _);
+                        sampleTotal++;
+                        if (coverPct > 0f) sheltered++;
+                    }
+                }
+                float shelterPct = sampleTotal > 0 ? (float)sheltered / sampleTotal * 100f : 0f;
+                args.Context.AddString($"[inspect dbg] bounds={masterBounds.min:F1} to {masterBounds.max:F1} sampleY={masterBounds.min.y + 0.5f:F1} sheltered={sheltered}/{sampleTotal}");
+
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"<color=orange>── Structure ({total} pieces) ──</color>");
+                sb.AppendLine($"Height: <color=white>{height:F1}m</color>  Footprint: <color=white>{footprintX:F0}x{footprintZ:F0}m</color>  Shape: <color=white>{shape}</color>");
+                sb.AppendLine($"Ground: <color=white>{groundCount}</color>  Roof: <color=white>{roofCount}</color>  Shelter: <color=white>{shelterPct:F0}%</color>  Health: <color=white>{avgHealth:F0}%</color>");
+                if (supportField != null)
+                    sb.AppendLine($"Support: full={fullSupport}/{total}  min={minSupport:F0}  max={maxSupport:F0}");
+                sb.AppendLine($"Comfort: <color=white>{maxComfort}</color>");
+                string matStr = string.Join("  ", materialTotals.Select(kv => $"<color=yellow>{kv.Key}</color>×{kv.Value}"));
+                sb.AppendLine($"Materials: {matStr}");
+                sb.AppendLine("<color=grey>────────────────</color>");
+                foreach (var kv in counts)
+                    sb.AppendLine($"  <color=yellow>{kv.Key}</color>: {kv.Value}");
+
+                string report = sb.ToString().TrimEnd();
+                args.Context.AddString(report);
+                MessageHudTimerPatch.ExtendNextCenter = true;
+                player.Message(MessageHud.MessageType.Center, report);
+
+                // Flash all pieces green so the player can see the extent of the structure
+                ((MonoBehaviour)plugin).StartCoroutine(FlashPieces(visited.Select(w => w.gameObject).ToList()));
+            });
+
+            // ── ath_prefabs ─────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("ath_prefabs",
+                "ath_prefabs <pattern> — list registered ZNetScene prefab names matching pattern", args =>
+            {
+                var scene = ZNetScene.instance;
+                if (scene == null) { args.Context.AddString("ZNetScene not ready."); return; }
+                var rf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+                var dict = typeof(ZNetScene).GetField("m_namedPrefabs", rf)?.GetValue(scene) as Dictionary<int, GameObject>;
+                if (dict == null) { args.Context.AddString("Could not read prefab list."); return; }
+                string pattern = args.Length > 1 ? args[1].ToLower() : "";
+                var matches = dict.Values.Where(g => g != null && (string.IsNullOrEmpty(pattern) || g.name.ToLower().Contains(pattern)))
+                    .Select(g => g.name).OrderBy(n => n).ToList();
+                args.Context.AddString($"=== {matches.Count} prefabs matching '{pattern}' ===");
+                foreach (var n in matches) args.Context.AddString($"  {n}");
+            });
+
+            // ── ath_transmats ───────────────────────────────────────────────
+            new Terminal.ConsoleCommand("ath_transmats",
+                "ath_transmats — list all unique transparent/translucent materials across all prefabs", args =>
+            {
+                var scene = ZNetScene.instance;
+                if (scene == null) { args.Context.AddString("ZNetScene not ready."); return; }
+                var rf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+                var dict = typeof(ZNetScene).GetField("m_namedPrefabs", rf)?.GetValue(scene) as Dictionary<int, GameObject>;
+                if (dict == null) { args.Context.AddString("Could not read prefab list."); return; }
+
+                // key = "matName | shaderName", value = one example prefab
+                var seen = new Dictionary<string, string>();
+                foreach (var go in dict.Values)
+                {
+                    if (go == null) continue;
+                    foreach (var r in go.GetComponentsInChildren<Renderer>(true))
+                    {
+                        foreach (var m in r.sharedMaterials)
+                        {
+                            if (m == null || m.shader == null) continue;
+                            var sn = m.shader.name;
+                            // transparent = render queue >= 2450, or shader name hints
+                            bool isTransparent = m.renderQueue >= 2450
+                                || sn.Contains("Transparent") || sn.Contains("Alpha")
+                                || sn.Contains("Particle") || sn.Contains("Unlit");
+                            if (!isTransparent) continue;
+                            var key = $"{m.name} | {sn}";
+                            if (!seen.ContainsKey(key)) seen[key] = go.name;
+                        }
+                    }
+                }
+                args.Context.AddString($"=== {seen.Count} transparent materials ===");
+                foreach (var kv in seen.OrderBy(k => k.Key))
+                    args.Context.AddString($"  {kv.Key}  (eg: {kv.Value})");
+            });
+
+            // ── ath_mats ────────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("ath_mats",
+                "ath_mats <prefabName> — list all renderers and shader names on a prefab", args =>
+            {
+                if (args.Length < 2) { args.Context.AddString("Usage: ath_mats <prefabName>"); return; }
+                var go = ZNetScene.instance?.GetPrefab(args[1]);
+                if (go == null) { args.Context.AddString($"Prefab '{args[1]}' not found."); return; }
+                foreach (var r in go.GetComponentsInChildren<Renderer>(includeInactive: true))
+                    foreach (var m in r.sharedMaterials)
+                        if (m != null) args.Context.AddString($"  {r.gameObject.name} | {m.name} | {m.shader?.name}");
+            });
+
+            // ── ath_wardmat ─────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("ath_wardmat",
+                "ath_wardmat <matName> — hot-swap the active campfire ward sphere material", args =>
+            {
+                if (args.Length < 2) { args.Context.AddString("Usage: ath_wardmat <matName>"); return; }
+                var rend = Plugin.ActiveCampfireWardRend;
+                if (rend == null) { args.Context.AddString("[wardmat] No active campfire ward."); return; }
+
+                string target = args[1].ToLower();
+                var scene = ZNetScene.instance;
+                if (scene == null) { args.Context.AddString("ZNetScene not ready."); return; }
+
+                var rf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+                var dict = typeof(ZNetScene).GetField("m_namedPrefabs", rf)?.GetValue(scene) as Dictionary<int, GameObject>;
+                if (dict == null) { args.Context.AddString("Could not read prefab list."); return; }
+
+                Material? found = null;
+                string? foundOn = null;
+                foreach (var go in dict.Values)
+                {
+                    if (go == null) continue;
+                    foreach (var r in go.GetComponentsInChildren<Renderer>(true))
+                        foreach (var m in r.sharedMaterials)
+                            if (m != null && m.name.ToLower() == target)
+                            { found = m; foundOn = go.name; break; }
+                    if (found != null) break;
+                }
+
+                if (found == null) { args.Context.AddString($"[wardmat] Material '{args[1]}' not found in any prefab."); return; }
+
+                var mat = new Material(found);
+                mat.SetInt("_Cull", 0);
+                if (mat.HasProperty("_Color"))       mat.color = new Color(0.55f, 0f, 1f, 0.15f);
+                if (mat.HasProperty("_TintColor"))   mat.SetColor("_TintColor", new Color(0.55f, 0f, 1f, 0.15f));
+                rend.material = mat;
+                args.Context.AddString($"[wardmat] Applied '{found.name}' (shader: {found.shader?.name}) from {foundOn}");
             });
 
             // ── ath_vfx ─────────────────────────────────────────────────────
@@ -1233,6 +1514,223 @@ namespace EnvReporter
             player.Message(MessageHud.MessageType.TopLeft, "You return to mortal scale.");
         }
 
+        // ── Ward bubble ritual ───────────────────────────────────────────────
+        // Applies SE_Shield to all nearby players. Replication is trivial — each client
+        // applies the SE to their own local player via the Pilgrim_ShieldBubble RPC.
+
+        internal const string ShieldBubbleRPC = "Pilgrim_ShieldBubble";
+
+        internal static void RegisterShieldBubbleRPC()
+        {
+            ZRoutedRpc.instance.Register<float>(ShieldBubbleRPC, (long sender, float duration) =>
+            {
+                var p = Player.m_localPlayer;
+                if (p == null) return;
+                ApplyShieldBubble(p, duration);
+            });
+        }
+
+        internal static void ApplyShieldBubble(Player player, float duration)
+        {
+            // SE_Shield lives on the StaffShield item, not in ObjectDB.m_StatusEffects
+            var se = ShieldBubbleSE;
+            if (se == null)
+            {
+                var staff = ObjectDB.instance?.GetItemPrefab("StaffShield")?.GetComponent<ItemDrop>();
+                se = staff?.m_itemData?.m_shared?.m_attackStatusEffect as SE_Shield
+                  ?? staff?.m_itemData?.m_shared?.m_equipStatusEffect as SE_Shield;
+                if (se == null) { Log.LogWarning("[Pilgrim] SE_Shield not found on StaffShield"); return; }
+                se.m_ttlPerItemLevel = 0;
+                ShieldBubbleSE = se;
+            }
+            se.m_ttl          = duration;
+            se.m_absorbDamage = 100f;
+            player.GetSEMan().AddStatusEffect(se, resetTime: true);
+            ShieldBubbleExpiry = Time.time + duration;
+
+            TweakPlayerBubble(player);
+        }
+
+        private static void TweakPlayerBubble(Player player)
+        {
+            ((MonoBehaviour)plugin).StartCoroutine(TweakPlayerBubbleRoutine(player));
+        }
+
+        private static System.Collections.IEnumerator FlashPieces(List<GameObject> pieces)
+        {
+            var wait = new WaitForSeconds(0.4f);
+            for (int pulse = 0; pulse < 5; pulse++)
+            {
+                // Save original colors and set green
+                var saved = new List<(Renderer r, Color[] cols)>();
+                foreach (var go in pieces)
+                {
+                    if (go == null) continue;
+                    foreach (var r in go.GetComponentsInChildren<Renderer>())
+                    {
+                        var orig = new Color[r.materials.Length];
+                        for (int i = 0; i < r.materials.Length; i++) orig[i] = r.materials[i].color;
+                        saved.Add((r, orig));
+                        foreach (var m in r.materials) if (m.HasProperty("_Color")) m.color = new Color(0f, 1f, 0.2f, m.color.a);
+                    }
+                }
+                yield return wait;
+                // Restore
+                foreach (var (r, cols) in saved)
+                {
+                    if (r == null) continue;
+                    for (int i = 0; i < r.materials.Length && i < cols.Length; i++)
+                        if (r.materials[i].HasProperty("_Color")) r.materials[i].color = cols[i];
+                }
+                yield return wait;
+            }
+        }
+
+        private static System.Collections.IEnumerator TweakPlayerBubbleRoutine(Player player)
+        {
+            yield return null; // one frame for SE startEffects to instantiate
+            bool found = false;
+            foreach (var r in player.GetComponentsInChildren<Renderer>(includeInactive: true))
+            {
+                if (r.gameObject.name != "Sphere") continue;
+                found = true;
+                r.transform.localScale = new Vector3(3f, 3f, 3f);
+                r.material.color = new Color(0.6f, 0f, 1f, 0.15f);
+                Log.LogInfo($"[Pilgrim] Bubble tweaked: shader={r.material.shader?.name} color={r.material.color}");
+            }
+            if (!found) Log.LogWarning("[Pilgrim] TweakPlayerBubble: Sphere not found on player");
+        }
+
+        internal static void ActivateWard(Player player, Fireplace fp, string message, float mult = 1f)
+        {
+            float duration = (Cfg.Rituals.Items.GetValueOrDefault("ward_bubble")?.Duration ?? 120f) * mult;
+            const float radius = 20f;
+
+            // Apply locally
+            ApplyShieldBubble(player, duration);
+
+            // Broadcast to all other players within radius
+            foreach (var peer in ZNet.instance?.GetPeers() ?? new System.Collections.Generic.List<ZNetPeer>())
+            {
+                var peerPos = peer.GetRefPos();
+                if (Vector3.Distance(fp.transform.position, peerPos) <= radius)
+                    ZRoutedRpc.instance.InvokeRoutedRPC(peer.m_uid, ShieldBubbleRPC, duration);
+            }
+
+            player.Message(MessageHud.MessageType.Center, message);
+            Log.LogInfo($"[Pilgrim] Shield bubble applied to nearby players for {duration}s");
+        }
+
+        internal static void TickWard() { } // no-op, SE_Shield self-expires
+
+        // ── Campfire ward ritual ─────────────────────────────────────────────
+        // Spawns an EffectArea.Type.NoMonsters sphere at the campfire so enemies
+        // cannot enter or target anything inside. Pure local physics — no ZNetView
+        // needed because MonsterAI runs on whichever machine owns the creature,
+        // and we broadcast the position via RPC so every machine gets its own copy.
+
+        private static Material? s_wardSphereMat;
+        private static Material? GetWardSphereMat()
+        {
+            if (s_wardSphereMat != null) return s_wardSphereMat;
+            // shield (Particles/Standard Unlit2) from fx_guardstone_activate — double-sided, transparent, purpose-built for ward visuals
+            var prefab = ZNetScene.instance?.GetPrefab("fx_guardstone_activate");
+            if (prefab == null) return null;
+            foreach (var r in prefab.GetComponentsInChildren<Renderer>(true))
+                if (r.sharedMaterial?.name == "shield")
+                { s_wardSphereMat = r.sharedMaterial; break; }
+            return s_wardSphereMat;
+        }
+
+        internal const string CampfireWardRPC       = "Pilgrim_CampfireWard";
+        internal const string CampfireWardCancelRPC  = "Pilgrim_CampfireWardCancel";
+        internal const float  CampfireWardRadius = 10f;
+
+        internal static void RegisterCampfireWardRPC()
+        {
+            ZRoutedRpc.instance.Register<Vector3, float>(CampfireWardRPC, (long sender, Vector3 pos, float duration) =>
+            {
+                SpawnCampfireWard(pos, duration, countdownFor: null);
+            });
+            ZRoutedRpc.instance.Register(CampfireWardCancelRPC, (long sender) =>
+            {
+                CampfireWardExpiry = 0f;
+                if (ActiveCampfireWard != null) { Object.Destroy(ActiveCampfireWard); ActiveCampfireWard = null; }
+            });
+        }
+
+        internal static void ActivateCampfireWard(Player player, Fireplace fp, string message, float duration)
+        {
+            var pos = fp.transform.position;
+            SpawnCampfireWard(pos, duration, countdownFor: player);
+            foreach (var peer in ZNet.instance?.GetPeers() ?? new System.Collections.Generic.List<ZNetPeer>())
+                ZRoutedRpc.instance.InvokeRoutedRPC(peer.m_uid, CampfireWardRPC, pos, duration);
+            player.Message(MessageHud.MessageType.Center, message);
+            Log.LogInfo($"[Pilgrim] Campfire ward raised at {pos} for {duration}s");
+        }
+
+        internal static void SpawnCampfireWard(Vector3 pos, float duration, Player? countdownFor)
+        {
+            // Build the ward root inactive so EffectArea.OnEnable sees m_type before registering
+            var root = new GameObject("Pilgrim_CampfireWard");
+            root.SetActive(false);
+            root.transform.position = pos;
+
+            var col = root.AddComponent<SphereCollider>();
+            col.radius    = CampfireWardRadius;
+            col.isTrigger = true;
+
+            var ea   = root.AddComponent<EffectArea>();
+            ea.m_type = EffectArea.Type.NoMonsters;
+
+            // Visual — primitive sphere with the guard_stone inrange_material,
+            // which is designed exactly for showing a ward area (Particles/Standard Unlit2,
+            // double-sided by default, tintable)
+            var sphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            Object.Destroy(sphere.GetComponent<Collider>());
+            sphere.transform.SetParent(root.transform);
+            sphere.transform.localPosition = Vector3.zero;
+            sphere.transform.localScale    = Vector3.one * (CampfireWardRadius * 2f);
+            var rend = sphere.GetComponent<Renderer>();
+            var wardMat = GetWardSphereMat();
+            if (wardMat != null)
+            {
+                var mat = new Material(wardMat);
+                mat.SetInt("_Cull", 0);
+                mat.color = new Color(0.55f, 0f, 1f, 0.10f);
+                if (mat.HasProperty("_TintColor")) mat.SetColor("_TintColor", new Color(0.55f, 0f, 1f, 0.15f));
+                Log.LogInfo($"[Pilgrim] Ward sphere: shader={mat.shader?.name} cull={mat.GetInt("_Cull")} color={mat.color}");
+                rend.material = mat;
+            }
+            else Log.LogWarning("[Pilgrim] fireplace_ash_glowing_purple not found on MountainKit_brazier_purple");
+            rend.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            rend.receiveShadows    = false;
+
+            root.SetActive(true);
+            Object.Destroy(root, duration);
+            if (countdownFor != null)
+            {
+                ActiveCampfireWard     = root;
+                ActiveCampfireWardRend = rend;
+                CampfireWardExpiry = Time.time + duration;
+                Log.LogInfo($"[Pilgrim] CampfireWardExpiry set to {CampfireWardExpiry:F1} (now={Time.time:F1})");
+                ((MonoBehaviour)plugin).StartCoroutine(WardCountdown(countdownFor, duration));
+            }
+        }
+
+        private static System.Collections.IEnumerator WardCountdown(Player player, float duration)
+        {
+            float remaining = duration;
+            while (remaining > 0f)
+            {
+                if (CampfireWardExpiry <= 0f) yield break; // relinquished
+                player.Message(MessageHud.MessageType.TopLeft, $"Ward: {Mathf.CeilToInt(remaining)}s");
+                yield return new WaitForSeconds(1f);
+                remaining -= 1f;
+            }
+            player.Message(MessageHud.MessageType.TopLeft, "The ward fades.");
+        }
+
         // ── Legendary weapon rituals ─────────────────────────────────────────
 
         internal static void ActivateLegendaryWeapon(LegendaryDef def, Player player, string message, float mult = 1f)
@@ -1338,6 +1836,8 @@ namespace EnvReporter
             if (SeekEnvExpiry      > 0f) return true;
             if (DungeonEnvExpiry   > 0f) return true;
             if (HomeEnvExpiry      > 0f) return true;
+            if (ShieldBubbleExpiry > 0f && Time.time < ShieldBubbleExpiry) return true;
+            if (ActiveCampfireWard != null) return true;
             // Guiding wind SE may outlive SeekEnvExpiry
             if (player.GetSEMan().HaveStatusEffect(GuidingWindSE?.NameHash() ?? 0)) return true;
             return false;
@@ -1350,6 +1850,24 @@ namespace EnvReporter
             // Rituals with dedicated deactivation paths
             if (GiantExpiry > 0f)        DeactivateGiant(player);
             if (FlamingSwordExpiry > 0f) DeactivateLegendaryWeapon(player, immediate: true);
+
+            if (ShieldBubbleExpiry > 0f)
+            {
+                ShieldBubbleExpiry = 0f;
+                var hash = ShieldBubbleSE?.NameHash() ?? 0;
+                if (hash != 0) player.GetSEMan().RemoveStatusEffect(hash);
+                // Belt-and-suspenders: also remove any SE_Shield in SEMan
+                var active = player.GetSEMan().GetStatusEffects()?.Find(s => s is SE_Shield);
+                if (active != null) player.GetSEMan().RemoveStatusEffect(active.NameHash());
+            }
+            if (ActiveCampfireWard != null)
+            {
+                Object.Destroy(ActiveCampfireWard);
+                ActiveCampfireWard = null;
+                CampfireWardExpiry = 0f;
+                foreach (var peer in ZNet.instance?.GetPeers() ?? new System.Collections.Generic.List<ZNetPeer>())
+                    ZRoutedRpc.instance.InvokeRoutedRPC(peer.m_uid, CampfireWardCancelRPC);
+            }
 
             // Feather: remove SE explicitly (expiry only gates our damage patch)
             if (FeatherRitualExpiry > 0f)
@@ -1646,15 +2164,14 @@ namespace EnvReporter
                 items.TryGetValue(key, out var r) && r.Enabled &&
                 (player == null || Plugin.IsRitualKnown(player, key));
 
-            // Deduplicate keys so clear_skies (two items) only shows once
+            // Build full deduplicated list of known ritual rows
             var seen = new System.Collections.Generic.HashSet<string>();
-            var rows = new System.Text.StringBuilder();
+            var allRows = new System.Collections.Generic.List<string>();
             foreach (var (_, _, key, _) in Plugin.RitualItemMap)
             {
                 if (!seen.Add(key)) continue;
                 if (!KnownAndEnabled(key)) continue;
                 if (!items.TryGetValue(key, out var r)) continue;
-                // Map key → friendly item name shown in hover
                 string itemLabel = key switch {
                     "seek_altar"    => "Boar Meat",
                     "restore_power" => "Mushroom",
@@ -1677,10 +2194,18 @@ namespace EnvReporter
                     "skull_splittur" => "Blood Bag",
                     "himminafl"      => "Tin",
                     "mistwalker"     => "Crystal",
+                    "ward_bubble"    => "Ruby",
+                    "campfire_ward"  => "Amber Pearl",
                     _                => key,
                 };
-                rows.Append($"\n  <color=yellow>{itemLabel}</color> — {r.HoverText}");
+                allRows.Add($"\n  <color=yellow>{itemLabel}</color> — {r.HoverText}");
             }
+
+            int pageCount = Mathf.Max(1, Mathf.CeilToInt((float)allRows.Count / Plugin.HintPageSize));
+            Plugin.HintPage = Plugin.HintPage % pageCount;
+            var pageRows = allRows.Skip(Plugin.HintPage * Plugin.HintPageSize).Take(Plugin.HintPageSize);
+            var rows = new System.Text.StringBuilder();
+            foreach (var row in pageRows) rows.Append(row);
 
             // Count totals (deduplicated by key)
             var allKeys = new System.Collections.Generic.HashSet<string>();
@@ -1692,17 +2217,19 @@ namespace EnvReporter
                 if (player != null && Plugin.IsRitualKnown(player, k)) knownKeys.Add(k);
             }
 
-            if (rows.Length == 0) return; // no known rituals — fire is just a fire
+if (rows.Length == 0) return; // no known rituals — fire is just a fire
 
             string cdStr = Plugin.RitualCooldownRemaining > 0f
                 ? $" <color=red>({Plugin.RitualCooldownRemaining:F0}s)</color>" : "";
             string countStr = $" <color={(knownKeys.Count < allKeys.Count ? "yellow" : "green")}>{knownKeys.Count}/{allKeys.Count}</color>";
 
-            __result += $"\n<size=12><color=orange>── Offerings{countStr}{cdStr} ──</color>";
+            __result += $"\n<size=11><color=orange>── Offerings{countStr}{cdStr} ──</color>";
             if (Plugin.ShowHintsEnabled)
             {
                 __result += rows.ToString();
-                __result += $"\n<color=grey>[H] Hide</color></size>";
+                string pageInfo = pageCount > 1 ? $" <color=grey>({Plugin.HintPage + 1}/{pageCount})</color>" : "";
+                string rHint   = pageCount > 1 ? $"  <color=grey>[R] Next page</color>" : "";
+                __result += $"\n<color=grey>[H] Hide</color>{rHint}{pageInfo}</size>";
             }
             else
             {
@@ -1758,6 +2285,8 @@ namespace EnvReporter
                          || (prefab == Plugin.TameFood       && RitualEnabled("tame_flock"))
                          || (prefab == Plugin.MeadFood       && RitualEnabled("mead_ripen"))
                          || (prefab == Plugin.GiantFood       && RitualEnabled("giant"))
+                         || (prefab == Plugin.WardFood        && RitualEnabled("ward_bubble"))
+                         || (prefab == Plugin.CampfireWardFood && RitualEnabled("campfire_ward"))
                          || (Plugin.LegendaryIngredientMatch(prefab) is string lk && RitualEnabled(lk));
             if (!isRitual) return true;
 
@@ -1847,6 +2376,15 @@ namespace EnvReporter
             {
                 if (RitualEnabled("giant"))
                 { Consume(); Plugin.ActivateGiant(__instance, RitualMsg("giant", "The mountain answers. You are vast."), ritualMult); return false; }
+            }
+            if (prefab == Plugin.WardFood)
+            {
+                Consume(); Plugin.ActivateWard(__instance, fp, RitualMsg("ward_bubble", "A ward rises. None shall pass.")); return false;
+            }
+            if (prefab == Plugin.CampfireWardFood && RitualEnabled("campfire_ward"))
+            {
+                float wardDur = (Plugin.Cfg.Rituals.Items.GetValueOrDefault("campfire_ward")?.Duration ?? 60f) * ritualMult;
+                Consume(); Plugin.ActivateCampfireWard(__instance, fp, RitualMsg("campfire_ward", "A sanctuary rises. None shall enter."), wardDur); return false;
             }
             if (Plugin.LegendaryIngredientMatch(prefab) is string legendaryKey && RitualEnabled(legendaryKey))
             {
@@ -2118,6 +2656,28 @@ namespace EnvReporter
             dyrnwyn.m_stopMessage  = "";
             __instance.m_StatusEffects.Add(dyrnwyn);
             Plugin.LegendarySE = dyrnwyn;
+
+            // Cache SE_Shield from ObjectDB and zero out m_ttlPerItemLevel so
+            // the internal SetLevel(0,0) call in AddStatusEffect never resets our TTL.
+            var shield = __instance.m_StatusEffects.Find(s => s is SE_Shield) as SE_Shield;
+            if (shield != null)
+            {
+                shield.m_ttlPerItemLevel = 0;
+                Plugin.ShieldBubbleSE = shield;
+
+                // Cache the Sphere material from SE_Shield's startEffects prefabs
+                // so the campfire ward sphere has it regardless of ritual order.
+                foreach (var fx in shield.m_startEffects.m_effectPrefabs)
+                {
+                    if (fx.m_prefab == null) continue;
+                    var r = fx.m_prefab.GetComponentInChildren<Renderer>();
+                    if (r != null && r.gameObject.name == "Sphere")
+                    {
+                        Plugin.WardSphereMat = new Material(r.sharedMaterial);
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -2853,6 +3413,8 @@ namespace EnvReporter
     {
         static void Postfix()
         {
+            Plugin.RegisterShieldBubbleRPC();
+            Plugin.RegisterCampfireWardRPC();
             ZRoutedRpc.instance.Register<Vector3, float>("Pilgrim_SendBird", (_, dir, speed) =>
                 Plugin.Scheduler?.SendBird(dir, speed));
 
@@ -3051,8 +3613,10 @@ namespace EnvReporter
         static void Postfix(Player __instance)
         {
             if (__instance != Player.m_localPlayer) return;
-            if (!Input.GetKeyDown(KeyCode.H)) return;
             if (!Plugin.Cfg.Rituals.Enabled) return;
+            bool h = Input.GetKeyDown(KeyCode.H);
+            bool r = Input.GetKeyDown(KeyCode.R);
+            if (!h && !r) return;
 
             var hoverObj = __instance.GetHoverObject();
             if (hoverObj == null) return;
@@ -3061,9 +3625,16 @@ namespace EnvReporter
             string goName = fp.gameObject.name.ToLower().Replace("(clone)", "").Trim();
             if (!System.Array.Exists(Plugin.CampfirePrefabs, p => goName.StartsWith(p))) return;
 
-            Plugin.ShowHintsEnabled = !Plugin.ShowHintsEnabled;
-            __instance.Message(MessageHud.MessageType.TopLeft,
-                Plugin.ShowHintsEnabled ? "Offerings shown." : "Offerings hidden.");
+            if (h)
+            {
+                Plugin.ShowHintsEnabled = !Plugin.ShowHintsEnabled;
+                __instance.Message(MessageHud.MessageType.TopLeft,
+                    Plugin.ShowHintsEnabled ? "Offerings shown." : "Offerings hidden.");
+            }
+            else if (r && Plugin.ShowHintsEnabled)
+            {
+                Plugin.HintPage++;
+            }
         }
     }
 
@@ -3817,6 +4388,8 @@ namespace EnvReporter
                     ["skull_splittur"] = new RitualItemConfig { Enabled = true, Item = "Bloodbag",     HoverText = "Summon Skull Splittur",   Message = "Skull Splittur demands a reckoning.", Duration = 60f },
                     ["himminafl"]      = new RitualItemConfig { Enabled = true, Item = "Tin",          HoverText = "Summon Himminafl",        Message = "Himminafl crackles with thunder.",    Duration = 60f },
                     ["mistwalker"]     = new RitualItemConfig { Enabled = true, Item = "Crystal",      HoverText = "Summon Mistwalker",       Message = "Mistwalker parts the veil.",          Duration = 60f },
+                    ["ward_bubble"]    = new RitualItemConfig { Enabled = true, Item = "Ruby",         HoverText = "Ward the campfire",        Message = "A ward rises. None shall pass.",      Duration = 300f },
+                    ["campfire_ward"]  = new RitualItemConfig { Enabled = true, Item = "AmberPearl",  HoverText = "Raise a sanctuary",        Message = "A sanctuary rises. None shall enter.", Duration = 60f },
                 },
             },
         };

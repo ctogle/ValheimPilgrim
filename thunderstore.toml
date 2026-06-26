@@ -4,7 +4,7 @@ schemaVersion = "0.0.1"
 [package]
 namespace = "ctogle"
 name = "Pilgrim"
-versionNumber = "0.3.2"
+versionNumber = "0.3.4"
 description = "Pilgrim introduces new mechanics that make it easier to avoid backtracking."
 websiteUrl = "https://github.com/ctogle/ValheimPilgrim"
 containsNsfwContent = false

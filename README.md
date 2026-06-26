@@ -27,6 +27,8 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
    - Summon Skull Splittur
    - Summon Himminafl
    - Summon Mistwalker
+   - Ward the campfire (player shield bubble)
+   - Raise a sanctuary (campfire ward — repels monsters)
 
 ## Requirements
 
