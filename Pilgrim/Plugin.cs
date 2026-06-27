@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.3.3")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.3.4")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -92,6 +92,10 @@ namespace EnvReporter
         internal static string GiantFood        => Cfg.Rituals.Items.GetValueOrDefault("giant")?.Item          ?? "YmirRemains";
         internal static string WardFood         => Cfg.Rituals.Items.GetValueOrDefault("ward_bubble")?.Item    ?? "Ruby";
         internal static string CampfireWardFood => Cfg.Rituals.Items.GetValueOrDefault("campfire_ward")?.Item ?? "AmberPearl";
+        internal static string RepairFood       => Cfg.Rituals.Items.GetValueOrDefault("repair")?.Item         ?? "Coal";
+        internal static string TarMoatFood      => Cfg.Rituals.Items.GetValueOrDefault("tar_moat")?.Item       ?? "Obsidian";
+        internal static string HuntIngredient(HuntDef def) =>
+            Cfg.Rituals.Items.GetValueOrDefault(def.Key)?.Item ?? def.DefaultIngredient;
         internal static string? LegendaryIngredientMatch(string prefab)
         {
             foreach (var def in LegendaryDefs)
@@ -126,29 +130,40 @@ namespace EnvReporter
         // (prefab, isPrefix, ritualKey, displayName) — order matters for wildcard checks
         internal static readonly (string Match, bool Prefix, string Key, string Display)[] RitualItemMap =
         {
-            ("RawMeat",       false, "seek_altar",    "Boar Meat"),
-            ("Mushroom",      true,  "restore_power", "Mushroom"),
-            ("Dandelion",     false, "seek_bed",      "Dandelion"),
-            ("Feathers",      false, "feather_fall",  "Feathers"),
-            ("Coins",         false, "seek_trader",   "Coins"),
-            ("Trophy",        true,  "seek_dungeon",  "a Trophy"),
-            ("GreydwarfEye",  false, "clear_skies",   "Greydwarf Eye"),
-            ("Stone",         false, "water_walk",    "Stone"),
-            ("AncientSeed",   false, "growth",        "Ancient Seed"),
-            ("BoneFragments", false, "tame_flock",    "Bone Fragments"),
-            ("Barley",        false, "mead_ripen",    "Barley"),
-            ("Flint",         false, "seek_player",   "Flint"),
-            ("Resin",         false, "kindle",        "Resin"),
-            ("YmirRemains",   false, "giant",         "Ymir Flesh"),
+            ("RawMeat",       false, "seek_altar",     "Boar Meat"),
+            ("Dandelion",     false, "seek_bed",       "Dandelion"),
+            ("Coins",         false, "seek_trader",    "Coins"),
+            ("Trophy",        true,  "seek_dungeon",   "a Trophy"),
+            ("Flint",         false, "seek_player",    "Flint"),
+            ("Mushroom",      true,  "restore_power",  "Mushroom"),
+            ("Feathers",      false, "feather_fall",   "Feathers"),
+            ("GreydwarfEye",  false, "clear_skies",    "Greydwarf Eye"),
+            ("Stone",         false, "water_walk",     "Stone"),
+            ("AncientSeed",   false, "growth",         "Ancient Seed"),
+            ("BoneFragments", false, "tame_flock",     "Bone Fragments"),
+            ("Barley",        false, "mead_ripen",     "Barley"),
+            ("Resin",         false, "kindle",         "Resin"),
+            ("Coal",          false, "repair",         "Coal"),
+            ("YmirRemains",   false, "giant",          "Ymir Flesh"),
+            ("Ruby",          false, "ward_bubble",    "Ruby"),
+            ("AmberPearl",    false, "campfire_ward",  "Amber Pearl"),
+            ("Obsidian",      false, "tar_moat",       "Obsidian"),
+            ("DeerHide",      false, "seek_deer",        "Deer Hide"),
+            ("LeatherScraps", false, "seek_boar",        "Leather Scraps"),
+            ("BJornHide",     false, "seek_bear",        "Bear Hide"),
+            ("TrollHide",     false, "seek_troll",       "Troll Hide"),
+            ("Root",          false, "seek_abomination", "Root"),
+            ("WolfPelt",      false, "seek_wolf",        "Wolf Pelt"),
+            ("LoxPelt",       false, "seek_lox",         "Lox Pelt"),
+            ("HareMeat",      false, "seek_misthare",    "Hare Meat"),
+            ("AskHide",       false, "seek_asksvin",     "Asksvin Hide"),
             ("SurtlingCore",  false, "flaming_sword",  "Surtling Core"),
             ("Ooze",          false, "jotun_bane",     "Ooze"),
-            ("Copper",        false, "krom",            "Copper"),
-            ("Iron",          false, "slayer",          "Iron"),
-            ("Bloodbag",      false, "skull_splittur",  "Blood Bag"),
-            ("Tin",           false, "himminafl",       "Tin"),
-            ("Crystal",       false, "mistwalker",      "Crystal"),
-            ("Ruby",          false, "ward_bubble",     "Ruby"),
-            ("AmberPearl",    false, "campfire_ward",   "Amber Pearl"),
+            ("Copper",        false, "krom",           "Copper"),
+            ("Iron",          false, "slayer",         "Iron"),
+            ("Bloodbag",      false, "skull_splittur", "Blood Bag"),
+            ("Tin",           false, "himminafl",      "Tin"),
+            ("Crystal",       false, "mistwalker",     "Crystal"),
         };
 
         internal struct LegendaryDef
@@ -161,6 +176,31 @@ namespace EnvReporter
             public string DefaultActivateMsg;
             public string DefaultDeactivateMsg;
         }
+
+        internal struct HuntDef
+        {
+            public string            Key;
+            public string            Prefab;
+            public string            DefaultIngredient;
+            public Heightmap.Biome   Biome;
+            public float             Scale;
+            public string            DefaultHoverText;
+            public string            DefaultMessage;
+            public float             DefaultDistance;
+        }
+
+        internal static readonly HuntDef[] HuntDefs =
+        {
+            new HuntDef { Key="seek_deer",        Prefab="Deer",        DefaultIngredient="DeerHide",      Biome=Heightmap.Biome.Meadows,     Scale=1.8f, DefaultHoverText="Hunt the deer",        DefaultMessage="He thinks he's alone.",                   DefaultDistance=100f },
+            new HuntDef { Key="seek_boar",        Prefab="Boar",        DefaultIngredient="LeatherScraps", Biome=Heightmap.Biome.Meadows,     Scale=1.8f, DefaultHoverText="Hunt the boar",        DefaultMessage="The boar roots nearby.",                   DefaultDistance=100f },
+            new HuntDef { Key="seek_bear",        Prefab="Bjorn",       DefaultIngredient="BJornHide",      Biome=Heightmap.Biome.BlackForest, Scale=1.8f, DefaultHoverText="Hunt the bear",        DefaultMessage="A great shadow waits in the trees.",       DefaultDistance=100f },
+            new HuntDef { Key="seek_troll",       Prefab="Troll",       DefaultIngredient="TrollHide",     Biome=Heightmap.Biome.BlackForest, Scale=1.8f, DefaultHoverText="Hunt the troll",       DefaultMessage="The earth shudders.",                      DefaultDistance=100f },
+            new HuntDef { Key="seek_abomination", Prefab="Abomination", DefaultIngredient="Root",          Biome=Heightmap.Biome.Swamp,       Scale=1.8f, DefaultHoverText="Hunt the abomination", DefaultMessage="Something ancient stirs in the roots.",    DefaultDistance=100f },
+            new HuntDef { Key="seek_wolf",        Prefab="Wolf",        DefaultIngredient="WolfPelt",      Biome=Heightmap.Biome.Mountain,    Scale=1.8f, DefaultHoverText="Hunt the wolf",        DefaultMessage="The pack circles.",                        DefaultDistance=100f },
+            new HuntDef { Key="seek_lox",         Prefab="Lox",         DefaultIngredient="LoxPelt",       Biome=Heightmap.Biome.Plains,      Scale=1.8f, DefaultHoverText="Hunt the lox",         DefaultMessage="The plains tremble beneath it.",           DefaultDistance=100f },
+            new HuntDef { Key="seek_misthare",    Prefab="Hare",        DefaultIngredient="HareMeat",      Biome=Heightmap.Biome.Mistlands,   Scale=1.8f, DefaultHoverText="Hunt the hare",        DefaultMessage="It darts through the mist.",               DefaultDistance=100f },
+            new HuntDef { Key="seek_asksvin",     Prefab="Asksvin",     DefaultIngredient="AskHide",   Biome=Heightmap.Biome.AshLands,    Scale=1.8f, DefaultHoverText="Hunt the asksvin",     DefaultMessage="Ash and ember — it hungers.",              DefaultDistance=100f },
+        };
 
         internal static readonly LegendaryDef[] LegendaryDefs =
         {
@@ -223,7 +263,7 @@ namespace EnvReporter
         internal static float FlamingSwordExpiry     = 0f; // alias kept for expiry-check sites
         internal static float LegendaryExpiry       => FlamingSwordExpiry;
         internal static LegendaryDef _activeLegendaryDef;
-        static ItemDrop.ItemData? _legendaryActiveItem = null;
+        internal static ItemDrop.ItemData? _legendaryActiveItem = null;
         static ItemDrop.ItemData? _legendaryOrigItem   = null;
         internal static float GiantExpiry          = 0f;
         internal static float ShieldBubbleExpiry   = 0f;
@@ -595,23 +635,7 @@ namespace EnvReporter
                     return;
                 }
 
-                // BFS flood-fill by proximity (2m step radius per piece)
-                const float stepRadius = 5f;
-                var visited   = new HashSet<WearNTear>();
-                var queue     = new Queue<WearNTear>();
-                visited.Add(seed);
-                queue.Enqueue(seed);
-
-                while (queue.Count > 0)
-                {
-                    var current = queue.Dequeue();
-                    foreach (var col in Physics.OverlapSphere(current.transform.position, stepRadius))
-                    {
-                        var neighbor = col.GetComponentInParent<WearNTear>();
-                        if (neighbor != null && neighbor.GetComponent<Piece>() != null && visited.Add(neighbor))
-                            queue.Enqueue(neighbor);
-                    }
-                }
+                var visited = Plugin.FloodFillStructure(seed);
 
                 // Tally pieces
                 var counts        = new SortedDictionary<string, int>();
@@ -682,11 +706,19 @@ namespace EnvReporter
 
                 // Max comfort from piece components
                 int maxComfort = 0;
+                var stationCounts = new SortedDictionary<string, int>();
                 foreach (var w in visited)
                 {
                     var piece = w.GetComponent<Piece>();
                     if (piece != null && piece.m_comfort > maxComfort)
                         maxComfort = piece.m_comfort;
+                    // Crafting stations and their extensions
+                    if (w.GetComponent<CraftingStation>() != null || w.GetComponent<StationExtension>() != null)
+                    {
+                        string sName = w.gameObject.name.Replace("(Clone)", "").Trim();
+                        stationCounts.TryGetValue(sName, out int sc);
+                        stationCounts[sName] = sc + 1;
+                    }
                 }
 
                 int total        = visited.Count;
@@ -727,6 +759,11 @@ namespace EnvReporter
                 sb.AppendLine($"Comfort: <color=white>{maxComfort}</color>");
                 string matStr = string.Join("  ", materialTotals.Select(kv => $"<color=yellow>{kv.Key}</color>×{kv.Value}"));
                 sb.AppendLine($"Materials: {matStr}");
+                if (stationCounts.Count > 0)
+                {
+                    string stStr = string.Join("  ", stationCounts.Select(kv => $"<color=cyan>{kv.Key}</color>×{kv.Value}"));
+                    sb.AppendLine($"Stations: {stStr}");
+                }
                 sb.AppendLine("<color=grey>────────────────</color>");
                 foreach (var kv in counts)
                     sb.AppendLine($"  <color=yellow>{kv.Key}</color>: {kv.Value}");
@@ -1073,9 +1110,10 @@ namespace EnvReporter
             "TrollCave02",                                      // troll caves (Black Forest)
             "SunkenCrypt4",                                     // sunken crypts (Swamp)
             "MountainCave02",                                   // mountain caves (Mountain)
+            "GoblinCamp2",                                          // fuling camp (Plains)
             "Hildir_crypt", "Hildir_cave", "Hildir_plainsfortress", // Hildir dungeons
             "Mistlands_DvergrTownEntrance1", "Mistlands_DvergrTownEntrance2", // infested mines (Mistlands)
-            "FortressRuins",                                    // Ashlands ruins
+            "CharredFortress",                                  // Ashlands ruins
             "MorgenHole1", "MorgenHole2", "MorgenHole3",       // morgen dens (Ashlands)
         };
 
@@ -1731,6 +1769,190 @@ namespace EnvReporter
             player.Message(MessageHud.MessageType.TopLeft, "The ward fades.");
         }
 
+        // ── Structure BFS (shared by ath_inspect and repair ritual) ──────────
+
+        internal static HashSet<WearNTear> FloodFillStructure(WearNTear seed, float stepRadius = 5f)
+        {
+            var visited = new HashSet<WearNTear>();
+            var queue   = new Queue<WearNTear>();
+            visited.Add(seed);
+            queue.Enqueue(seed);
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                foreach (var col in Physics.OverlapSphere(current.transform.position, stepRadius))
+                {
+                    var neighbor = col.GetComponentInParent<WearNTear>();
+                    if (neighbor != null && neighbor.GetComponent<Piece>() != null && visited.Add(neighbor))
+                        queue.Enqueue(neighbor);
+                }
+            }
+            return visited;
+        }
+
+        // ── Seek deer ritual ─────────────────────────────────────────────────
+
+        internal static bool ActivateHunt(HuntDef def, Player player, Fireplace fp, string message)
+        {
+            var wg = WorldGenerator.instance;
+            if (wg == null) { player.Message(MessageHud.MessageType.Center, "The wilds do not answer."); return false; }
+
+            float targetDist = Cfg.Rituals.Items.GetValueOrDefault(def.Key)?.Distance ?? def.DefaultDistance;
+            if (targetDist <= 0f) targetDist = def.DefaultDistance;
+
+            Vector3 origin = player.transform.position;
+            const int samples = 24;
+            Vector3 spawnPos = Vector3.zero;
+            bool found = false;
+
+            float angleOffset = UnityEngine.Random.value * Mathf.PI * 2f;
+            for (int i = 0; i < samples; i++)
+            {
+                float angle = angleOffset + (i / (float)samples) * Mathf.PI * 2f;
+                float dist  = targetDist + UnityEngine.Random.Range(-20f, 20f);
+                float cx = origin.x + Mathf.Cos(angle) * dist;
+                float cz = origin.z + Mathf.Sin(angle) * dist;
+                if (wg.GetBiome(cx, cz) != def.Biome) continue;
+                float cy = ZoneSystem.instance?.GetSolidHeight(new Vector3(cx, 0f, cz)) ?? origin.y;
+                if (cy < -100f || cy > 2000f) cy = origin.y;
+                spawnPos = new Vector3(cx, cy + 0.5f, cz);
+                found = true;
+                break;
+            }
+
+            if (!found) { player.Message(MessageHud.MessageType.Center, $"You are too far from the {def.Biome}."); return false; }
+
+            var creature = ZNetScene.instance?.GetPrefab(def.Prefab);
+            if (creature == null) { Log.LogWarning($"[Pilgrim] Hunt prefab not found: {def.Prefab}"); return false; }
+
+            var spawned = Object.Instantiate(creature, spawnPos, Quaternion.Euler(0f, UnityEngine.Random.Range(0f, 360f), 0f));
+
+            var rf = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+
+            spawned.transform.localScale = Vector3.one * def.Scale;
+            var spawnedZv = spawned.GetComponent<ZNetView>();
+            if (spawnedZv != null && spawnedZv.IsValid())
+            {
+                spawnedZv.GetZDO().Set("scale", def.Scale);
+                spawnedZv.GetZDO().Set(ZDOVars.s_level, 2); // 1 star
+            }
+            spawned.GetComponent<Character>()?.SetLevel(2);
+
+            // Idle AI — clear flee/alert state
+            var animalAi = spawned.GetComponent<AnimalAI>();
+            if (animalAi != null)
+            {
+                typeof(AnimalAI).GetMethod("SetAlerted", rf)?.Invoke(animalAi, new object[] { false });
+                typeof(AnimalAI).GetField("m_fleeTarget", rf)?.SetValue(animalAi, null);
+            }
+            var baseAi = spawned.GetComponent<BaseAI>();
+            if (baseAi != null)
+                typeof(BaseAI).GetMethod("SetAlerted", rf)?.Invoke(baseAi, new object[] { false });
+
+            // Crows point the way
+            Vector3 dir = (spawnPos - origin);
+            dir.y = 0f;
+            dir.Normalize();
+            BroadcastBird(dir);
+
+            float actualDist = Vector3.Distance(origin, spawnPos);
+            player.Message(MessageHud.MessageType.Center, message);
+            Log.LogInfo($"[Pilgrim] Hunt {def.Prefab} spawned at {spawnPos} ({actualDist:F0}m, scale {def.Scale:F1}x)");
+            return true;
+        }
+
+        // ── Repair ritual ────────────────────────────────────────────────────
+
+        internal static void ActivateRepair(Player player, Fireplace fp, string message)
+        {
+            var seed = Physics.OverlapSphere(player.transform.position, 5f)
+                .Select(c => c.GetComponentInParent<WearNTear>())
+                .Where(w => w != null && w.GetComponent<Piece>() != null)
+                .OrderBy(w => Vector3.Distance(w.transform.position, player.transform.position))
+                .FirstOrDefault();
+
+            if (seed == null)
+            {
+                player.Message(MessageHud.MessageType.Center, "No structure nearby to mend.");
+                return;
+            }
+
+            var pieces = FloodFillStructure(seed);
+            int count = 0;
+            foreach (var wnt in pieces)
+            {
+                var zv = wnt.GetComponent<ZNetView>();
+                if (zv == null || !zv.IsValid() || !zv.IsOwner()) continue;
+                if (wnt.Repair()) count++;
+            }
+            player.Message(MessageHud.MessageType.Center, $"{message} ({count}/{pieces.Count} pieces)");
+            Log.LogInfo($"[Pilgrim] Repair ritual: seed={seed.gameObject.name} flood={pieces.Count} repaired={count}");
+        }
+
+        // ── Tar moat ritual ───────────────────────────────────────────────────
+
+        internal const string TarMoatRPC = "Pilgrim_TarMoat";
+
+        internal static void RegisterTarMoatRPC()
+        {
+            // RPC is notification-only on clients — spawner owns all ZDOs, which replicate automatically.
+            // Clients just need to know the ritual fired (for future VFX/sound hooks).
+            ZRoutedRpc.instance.Register<Vector3>(TarMoatRPC, (long sender, Vector3 pos) =>
+            {
+                Log.LogInfo($"[Pilgrim] Tar moat notification received at {pos}");
+            });
+        }
+
+        internal static void ActivateTarMoat(Player player, Fireplace fp, string message)
+        {
+            var pos = fp.transform.position;
+            var spawned = SpawnTarMoat(pos);
+            foreach (var peer in ZNet.instance?.GetPeers() ?? new System.Collections.Generic.List<ZNetPeer>())
+                ZRoutedRpc.instance.InvokeRoutedRPC(peer.m_uid, TarMoatRPC, pos);
+            player.Message(MessageHud.MessageType.Center, message);
+            Log.LogInfo($"[Pilgrim] Tar moat raised at {pos} ({spawned.Count} pieces)");
+            // Auto-remove after 60s — ZNetScene.Destroy replicates to all clients
+            if (spawned.Count > 0)
+                Plugin.plugin.StartCoroutine(RemoveTarMoat(spawned, 60f));
+        }
+
+        private static System.Collections.IEnumerator RemoveTarMoat(List<GameObject> pieces, float delay)
+        {
+            yield return new WaitForSeconds(delay);
+            foreach (var go in pieces)
+            {
+                if (go == null) continue;
+                var zv = go.GetComponent<ZNetView>();
+                if (zv != null && zv.IsValid())
+                    ZNetScene.instance.Destroy(go);
+                else if (go != null)
+                    Object.Destroy(go);
+            }
+            Log.LogInfo($"[Pilgrim] Tar moat expired, removed {pieces.Count} pieces");
+        }
+
+        internal static List<GameObject> SpawnTarMoat(Vector3 center)
+        {
+            var result = new List<GameObject>();
+            var tarPrefab = ZNetScene.instance?.GetPrefab("TarLiquid");
+            if (tarPrefab == null) { Log.LogWarning("[Pilgrim] TarLiquid prefab not found"); return result; }
+
+            const float innerRadius = 27f;
+            const float outerRadius = 33f;
+            const float spacing     = 7f;
+
+            for (float x = -outerRadius; x <= outerRadius; x += spacing)
+            for (float z = -outerRadius; z <= outerRadius; z += spacing)
+            {
+                float dist = Mathf.Sqrt(x * x + z * z);
+                if (dist < innerRadius || dist > outerRadius) continue;
+                var spawnPos = new Vector3(center.x + x, center.y, center.z + z);
+                spawnPos.y = (ZoneSystem.instance?.GetSolidHeight(spawnPos) ?? center.y) - 0.3f;
+                result.Add(Object.Instantiate(tarPrefab, spawnPos, Quaternion.identity));
+            }
+            return result;
+        }
+
         // ── Legendary weapon rituals ─────────────────────────────────────────
 
         internal static void ActivateLegendaryWeapon(LegendaryDef def, Player player, string message, float mult = 1f)
@@ -1769,6 +1991,13 @@ namespace EnvReporter
             float duration = (Cfg.Rituals.Items.GetValueOrDefault(def.Key)?.Duration ?? 60f) * mult;
             FlamingSwordExpiry = Time.time + duration;
 
+            // Persist so we can clean up if the player logs out mid-ritual
+            long expiryEpoch = System.DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (long)duration;
+            player.m_customData["ath_legendary_key"]        = def.Key;
+            player.m_customData["ath_legendary_expiry"]     = expiryEpoch.ToString();
+            player.m_customData["ath_legendary_orig"]       = currentRight?.m_dropPrefab?.name ?? "";
+            player.m_customData["ath_legendary_orig_level"] = (currentRight?.m_quality ?? 1).ToString();
+
             var se = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == "SE_LegendaryWeapon") ?? LegendarySE;
             if (se != null) { se.m_ttl = duration; player.GetSEMan().AddStatusEffect(se, true); }
 
@@ -1799,6 +2028,10 @@ namespace EnvReporter
         internal static void DeactivateLegendaryWeapon(Player player, bool immediate = false)
         {
             FlamingSwordExpiry = 0f;
+            player.m_customData.Remove("ath_legendary_key");
+            player.m_customData.Remove("ath_legendary_expiry");
+            player.m_customData.Remove("ath_legendary_orig");
+            player.m_customData.Remove("ath_legendary_orig_level");
             BroadcastVfx(player.transform.position, "fx_fireskeleton_nova", 0f);
             if (immediate) FinishLegendarySwapBack(player);
             else Scheduler?.RunDelayed(0.5f, () => FinishLegendarySwapBack(player));
@@ -2164,69 +2397,51 @@ namespace EnvReporter
                 items.TryGetValue(key, out var r) && r.Enabled &&
                 (player == null || Plugin.IsRitualKnown(player, key));
 
-            // Build full deduplicated list of known ritual rows
-            var seen = new System.Collections.Generic.HashSet<string>();
-            var allRows = new System.Collections.Generic.List<string>();
+            // Group known rituals by domain (order within domain = RitualItemMap order)
+            var domainMap = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<(string key, string label, string hoverText)>>();
+            var domainOrder = new System.Collections.Generic.List<string>();
+            var allKeys   = new System.Collections.Generic.HashSet<string>();
+            var knownKeys = new System.Collections.Generic.HashSet<string>();
+
             foreach (var (_, _, key, _) in Plugin.RitualItemMap)
             {
-                if (!seen.Add(key)) continue;
+                if (!items.TryGetValue(key, out var rc) || !rc.Enabled) continue;
+                allKeys.Add(key);
+                if (player != null && Plugin.IsRitualKnown(player, key)) knownKeys.Add(key);
                 if (!KnownAndEnabled(key)) continue;
-                if (!items.TryGetValue(key, out var r)) continue;
-                string itemLabel = key switch {
-                    "seek_altar"    => "Boar Meat",
-                    "restore_power" => "Mushroom",
-                    "seek_bed"      => "Dandelion",
-                    "feather_fall"  => "Feathers",
-                    "seek_trader"   => "Coins",
-                    "seek_dungeon"  => "Trophy",
-                    "clear_skies"   => "Greydwarf Eye",
-                    "water_walk"    => "Stone",
-                    "growth"        => "Ancient Seed",
-                    "tame_flock"    => "Bone Fragments",
-                    "mead_ripen"    => "Barley",
-                    "seek_player"   => "Flint",
-                    "kindle"        => "Resin",
-                    "giant"         => "Ymir Flesh",
-                    "flaming_sword"  => "Surtling Core",
-                    "jotun_bane"     => "Ooze",
-                    "krom"           => "Copper",
-                    "slayer"         => "Iron",
-                    "skull_splittur" => "Blood Bag",
-                    "himminafl"      => "Tin",
-                    "mistwalker"     => "Crystal",
-                    "ward_bubble"    => "Ruby",
-                    "campfire_ward"  => "Amber Pearl",
-                    _                => key,
-                };
-                allRows.Add($"\n  <color=yellow>{itemLabel}</color> — {r.HoverText}");
+                string domain = string.IsNullOrEmpty(rc.Domain) ? "Blessings" : rc.Domain;
+                if (!domainMap.ContainsKey(domain)) { domainMap[domain] = new System.Collections.Generic.List<(string,string,string)>(); domainOrder.Add(domain); }
+                domainMap[domain].Add((key, rc.Item, rc.HoverText));
             }
 
-            int pageCount = Mathf.Max(1, Mathf.CeilToInt((float)allRows.Count / Plugin.HintPageSize));
-            Plugin.HintPage = Plugin.HintPage % pageCount;
-            var pageRows = allRows.Skip(Plugin.HintPage * Plugin.HintPageSize).Take(Plugin.HintPageSize);
-            var rows = new System.Text.StringBuilder();
-            foreach (var row in pageRows) rows.Append(row);
+            if (domainOrder.Count == 0) return;
 
-            // Count totals (deduplicated by key)
-            var allKeys = new System.Collections.Generic.HashSet<string>();
-            var knownKeys = new System.Collections.Generic.HashSet<string>();
+            int pageCount = domainOrder.Count;
+            Plugin.HintPage = Plugin.HintPage % pageCount;
+            string currentDomain = domainOrder[Plugin.HintPage];
+            var pageRituals = domainMap[currentDomain];
+
+            // Known/total for this domain
+            int domainKnown = 0, domainTotal = 0;
             foreach (var (_, _, k, _) in Plugin.RitualItemMap)
             {
-                if (!items.TryGetValue(k, out var rc) || !rc.Enabled) continue;
-                allKeys.Add(k);
-                if (player != null && Plugin.IsRitualKnown(player, k)) knownKeys.Add(k);
+                if (!items.TryGetValue(k, out var rc2) || !rc2.Enabled) continue;
+                string d = string.IsNullOrEmpty(rc2.Domain) ? "Blessings" : rc2.Domain;
+                if (d != currentDomain) continue;
+                domainTotal++;
+                if (player != null && Plugin.IsRitualKnown(player, k)) domainKnown++;
             }
 
-if (rows.Length == 0) return; // no known rituals — fire is just a fire
-
-            string cdStr = Plugin.RitualCooldownRemaining > 0f
-                ? $" <color=red>({Plugin.RitualCooldownRemaining:F0}s)</color>" : "";
+            string cdStr    = Plugin.RitualCooldownRemaining > 0f ? $" <color=red>({Plugin.RitualCooldownRemaining:F0}s)</color>" : "";
             string countStr = $" <color={(knownKeys.Count < allKeys.Count ? "yellow" : "green")}>{knownKeys.Count}/{allKeys.Count}</color>";
 
             __result += $"\n<size=11><color=orange>── Offerings{countStr}{cdStr} ──</color>";
             if (Plugin.ShowHintsEnabled)
             {
-                __result += rows.ToString();
+                string domainKnownStr = $" <color={(domainKnown < domainTotal ? "yellow" : "green")}>{domainKnown}/{domainTotal}</color>";
+                __result += $"\n<color=orange>{currentDomain}{domainKnownStr}</color>";
+                foreach (var (key, item, hoverText) in pageRituals)
+                    __result += $"\n  <color=yellow>{item}</color> — {hoverText}";
                 string pageInfo = pageCount > 1 ? $" <color=grey>({Plugin.HintPage + 1}/{pageCount})</color>" : "";
                 string rHint   = pageCount > 1 ? $"  <color=grey>[R] Next page</color>" : "";
                 __result += $"\n<color=grey>[H] Hide</color>{rHint}{pageInfo}</size>";
@@ -2285,8 +2500,11 @@ if (rows.Length == 0) return; // no known rituals — fire is just a fire
                          || (prefab == Plugin.TameFood       && RitualEnabled("tame_flock"))
                          || (prefab == Plugin.MeadFood       && RitualEnabled("mead_ripen"))
                          || (prefab == Plugin.GiantFood       && RitualEnabled("giant"))
-                         || (prefab == Plugin.WardFood        && RitualEnabled("ward_bubble"))
+                         || (prefab == Plugin.WardFood         && RitualEnabled("ward_bubble"))
                          || (prefab == Plugin.CampfireWardFood && RitualEnabled("campfire_ward"))
+                         || (prefab == Plugin.RepairFood       && RitualEnabled("repair"))
+                         || (prefab == Plugin.TarMoatFood      && RitualEnabled("tar_moat"))
+                         || Plugin.HuntDefs.Any(d => prefab == Plugin.HuntIngredient(d) && RitualEnabled(d.Key))
                          || (Plugin.LegendaryIngredientMatch(prefab) is string lk && RitualEnabled(lk));
             if (!isRitual) return true;
 
@@ -2385,6 +2603,20 @@ if (rows.Length == 0) return; // no known rituals — fire is just a fire
             {
                 float wardDur = (Plugin.Cfg.Rituals.Items.GetValueOrDefault("campfire_ward")?.Duration ?? 60f) * ritualMult;
                 Consume(); Plugin.ActivateCampfireWard(__instance, fp, RitualMsg("campfire_ward", "A sanctuary rises. None shall enter."), wardDur); return false;
+            }
+            if (prefab == Plugin.RepairFood && RitualEnabled("repair"))
+            {
+                Consume(); Plugin.ActivateRepair(__instance, fp, RitualMsg("repair", "The fire remembers. Your works are mended.")); return false;
+            }
+            if (prefab == Plugin.TarMoatFood && RitualEnabled("tar_moat"))
+            {
+                Consume(); Plugin.ActivateTarMoat(__instance, fp, RitualMsg("tar_moat", "The earth bleeds black. None shall cross.")); return false;
+            }
+            var huntMatch = System.Array.Find(Plugin.HuntDefs, d => prefab == Plugin.HuntIngredient(d) && RitualEnabled(d.Key));
+            if (huntMatch.Key != null)
+            {
+                if (Plugin.ActivateHunt(huntMatch, __instance, fp, RitualMsg(huntMatch.Key, huntMatch.DefaultMessage))) Consume();
+                return false;
             }
             if (Plugin.LegendaryIngredientMatch(prefab) is string legendaryKey && RitualEnabled(legendaryKey))
             {
@@ -3415,6 +3647,7 @@ if (rows.Length == 0) return; // no known rituals — fire is just a fire
         {
             Plugin.RegisterShieldBubbleRPC();
             Plugin.RegisterCampfireWardRPC();
+            Plugin.RegisterTarMoatRPC();
             ZRoutedRpc.instance.Register<Vector3, float>("Pilgrim_SendBird", (_, dir, speed) =>
                 Plugin.Scheduler?.SendBird(dir, speed));
 
@@ -3537,6 +3770,46 @@ if (rows.Length == 0) return; // no known rituals — fire is just a fire
 
             var inv = __instance.GetInventory();
             if (inv == null) return;
+
+            // Clean up any legendary weapon that persisted through a logout
+            if (__instance.m_customData.TryGetValue("ath_legendary_key", out var legKey) &&
+                __instance.m_customData.TryGetValue("ath_legendary_expiry", out var legExpStr) &&
+                long.TryParse(legExpStr, out var legExp))
+            {
+                long nowEpoch = System.DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                var def = System.Array.Find(Plugin.LegendaryDefs, d => d.Key == legKey);
+                if (nowEpoch >= legExp || def.Prefab == null)
+                {
+                    // Unequip and remove the legendary weapon
+                    var staleItem = inv.GetAllItems().FirstOrDefault(i => i.m_dropPrefab?.name == def.Prefab);
+                    if (staleItem != null) { __instance.UnequipItem(staleItem); inv.RemoveItem(staleItem); }
+
+                    // Restore original weapon if one was saved
+                    __instance.m_customData.TryGetValue("ath_legendary_orig", out var origPrefab);
+                    __instance.m_customData.TryGetValue("ath_legendary_orig_level", out var origLevelStr);
+                    if (!string.IsNullOrEmpty(origPrefab) && ZNetScene.instance?.GetPrefab(origPrefab) != null)
+                    {
+                        int.TryParse(origLevelStr, out int origLevel);
+                        if (origLevel < 1) origLevel = 1;
+                        var restored = inv.AddItem(origPrefab, 1, origLevel, 0, 0L, "");
+                        if (restored != null) __instance.EquipItem(restored);
+                        Plugin.Log.LogInfo($"[Pilgrim] Restored original weapon {origPrefab} q{origLevel}");
+                    }
+
+                    __instance.m_customData.Remove("ath_legendary_key");
+                    __instance.m_customData.Remove("ath_legendary_expiry");
+                    __instance.m_customData.Remove("ath_legendary_orig");
+                    __instance.m_customData.Remove("ath_legendary_orig_level");
+                    Plugin.Log.LogInfo($"[Pilgrim] Stripped expired legendary {def.Prefab} on load");
+                }
+                else
+                {
+                    Plugin._activeLegendaryDef  = def;
+                    Plugin._legendaryActiveItem = inv.GetAllItems().FirstOrDefault(i => i.m_dropPrefab?.name == def.Prefab);
+                    Plugin.FlamingSwordExpiry   = Time.time + (legExp - nowEpoch);
+                    Plugin.Log.LogInfo($"[Pilgrim] Restored legendary {def.Prefab} with {legExp - nowEpoch}s remaining");
+                }
+            }
 
             foreach (var invItem in inv.GetAllItems())
             {
@@ -4367,29 +4640,40 @@ if (rows.Length == 0) return; // no known rituals — fire is just a fire
                 },
                 Items    = new Dictionary<string, RitualItemConfig>
                 {
-                    ["seek_altar"]    = new RitualItemConfig { Enabled = true, Item = "RawMeat",    HoverText = "Seek the next altar",       Message = "The wind stirs — {boss} awaits." },
-                    ["restore_power"] = new RitualItemConfig { Enabled = true, Item = "Mushroom*",  HoverText = "Restore your power",         Message = "The flame accepts your offering. {power} is ready.", Duration = 600f },
-                    ["seek_bed"]      = new RitualItemConfig { Enabled = true, Item = "Dandelion",  HoverText = "Seek your bed",              Message = "The flower carries you home..." },
-                    ["feather_fall"]  = new RitualItemConfig { Enabled = true, Item = "Feathers",   HoverText = "Fall without fear",          Message = "Light as a feather — fall without fear." },
-                    ["seek_trader"]   = new RitualItemConfig { Enabled = true, Item = "Coins",      HoverText = "Seek a merchant",            Message = "Gold calls to gold..." },
-                    ["seek_dungeon"]  = new RitualItemConfig { Enabled = true, Item = "Trophy*",    HoverText = "Seek the nearest dungeon",   Message = "The veil parts — something stirs nearby." },
-                    ["clear_skies"]   = new RitualItemConfig { Enabled = true, Item = "GreydwarfEye", HoverText = "Clear the skies",          Message = "The clouds part.", Duration = 900f },
-                    ["water_walk"]    = new RitualItemConfig { Enabled = true, Item = "Stone",      HoverText = "Walk on water",              Message = "The sea grows still beneath your feet.", Duration = 60f },
-                    ["growth"]        = new RitualItemConfig { Enabled = true, Item = "AncientSeed",HoverText = "Bless your crops",           Message = "The seed remembers the earth. Sleep, and your crops will answer." },
-                    ["seek_player"]   = new RitualItemConfig { Enabled = true, Item = "Flint",      HoverText = "Seek a fellow pilgrim",      Message = "Find fellowship." },
-                    ["kindle"]        = new RitualItemConfig { Enabled = true, Item = "Resin",      HoverText = "Kindle nearby fires",        Message = "The darkness yields." },
-                    ["tame_flock"]    = new RitualItemConfig { Enabled = true, Item = "BoneFragments", HoverText = "Tame the flock",          Message = "The bones remember loyalty. Sleep, and your flock will answer." },
-                    ["mead_ripen"]    = new RitualItemConfig { Enabled = true, Item = "Barley",         HoverText = "Ripen the mead",           Message = "The grain remembers the harvest. Sleep, and your mead will answer." },
-                    ["giant"]         = new RitualItemConfig { Enabled = true, Item = "YmirRemains",   HoverText = "Become the mountain",      Message = "The mountain answers. You are vast.", Duration = 60f },
-                    ["flaming_sword"]  = new RitualItemConfig { Enabled = true, Item = "SurtlingCore", HoverText = "Summon Dyrnwyn",         Message = "Dyrnwyn answers. Let it burn.",       Duration = 60f },
-                    ["jotun_bane"]     = new RitualItemConfig { Enabled = true, Item = "Ooze",         HoverText = "Summon Jotun Bane",       Message = "Jotun Bane answers the call.",        Duration = 60f },
-                    ["krom"]           = new RitualItemConfig { Enabled = true, Item = "Copper",       HoverText = "Summon Krom",             Message = "Krom rises from the deep.",           Duration = 60f },
-                    ["slayer"]         = new RitualItemConfig { Enabled = true, Item = "Iron",         HoverText = "Summon Slayer",           Message = "Slayer hungers.",                     Duration = 60f },
-                    ["skull_splittur"] = new RitualItemConfig { Enabled = true, Item = "Bloodbag",     HoverText = "Summon Skull Splittur",   Message = "Skull Splittur demands a reckoning.", Duration = 60f },
-                    ["himminafl"]      = new RitualItemConfig { Enabled = true, Item = "Tin",          HoverText = "Summon Himminafl",        Message = "Himminafl crackles with thunder.",    Duration = 60f },
-                    ["mistwalker"]     = new RitualItemConfig { Enabled = true, Item = "Crystal",      HoverText = "Summon Mistwalker",       Message = "Mistwalker parts the veil.",          Duration = 60f },
-                    ["ward_bubble"]    = new RitualItemConfig { Enabled = true, Item = "Ruby",         HoverText = "Ward the campfire",        Message = "A ward rises. None shall pass.",      Duration = 300f },
-                    ["campfire_ward"]  = new RitualItemConfig { Enabled = true, Item = "AmberPearl",  HoverText = "Raise a sanctuary",        Message = "A sanctuary rises. None shall enter.", Duration = 60f },
+                    ["seek_altar"]    = new RitualItemConfig { Enabled = true, Item = "RawMeat",       HoverText = "Seek the next altar",       Message = "The wind stirs — {boss} awaits.",                                    Domain = "Navigation" },
+                    ["seek_bed"]      = new RitualItemConfig { Enabled = true, Item = "Dandelion",     HoverText = "Seek your bed",              Message = "The flower carries you home...",                                            Domain = "Navigation" },
+                    ["seek_trader"]   = new RitualItemConfig { Enabled = true, Item = "Coins",         HoverText = "Seek a merchant",            Message = "Gold calls to gold...",                                                     Domain = "Navigation" },
+                    ["seek_dungeon"]  = new RitualItemConfig { Enabled = true, Item = "Trophy*",       HoverText = "Seek the nearest dungeon",   Message = "The veil parts — something stirs nearby.",                                 Domain = "Navigation" },
+                    ["seek_player"]   = new RitualItemConfig { Enabled = true, Item = "Flint",         HoverText = "Seek a fellow pilgrim",      Message = "Find fellowship.",                                                         Domain = "Navigation" },
+                    ["restore_power"] = new RitualItemConfig { Enabled = true, Item = "Mushroom*",     HoverText = "Restore your power",         Message = "The flame accepts your offering. {power} is ready.", Duration = 600f,      Domain = "Blessings" },
+                    ["feather_fall"]  = new RitualItemConfig { Enabled = true, Item = "Feathers",      HoverText = "Fall without fear",          Message = "Light as a feather — fall without fear.",                                  Domain = "Blessings" },
+                    ["clear_skies"]   = new RitualItemConfig { Enabled = true, Item = "GreydwarfEye",  HoverText = "Clear the skies",            Message = "The clouds part.", Duration = 900f,                                        Domain = "Blessings" },
+                    ["water_walk"]    = new RitualItemConfig { Enabled = true, Item = "Stone",         HoverText = "Walk on water",              Message = "The sea grows still beneath your feet.", Duration = 60f,                   Domain = "Blessings" },
+                    ["growth"]        = new RitualItemConfig { Enabled = true, Item = "AncientSeed",   HoverText = "Bless your crops",           Message = "The seed remembers the earth. Sleep, and your crops will answer.",         Domain = "Blessings" },
+                    ["tame_flock"]    = new RitualItemConfig { Enabled = true, Item = "BoneFragments", HoverText = "Tame the flock",             Message = "The bones remember loyalty. Sleep, and your flock will answer.",           Domain = "Blessings" },
+                    ["mead_ripen"]    = new RitualItemConfig { Enabled = true, Item = "Barley",        HoverText = "Ripen the mead",             Message = "The grain remembers the harvest. Sleep, and your mead will answer.",       Domain = "Blessings" },
+                    ["kindle"]        = new RitualItemConfig { Enabled = true, Item = "Resin",         HoverText = "Kindle nearby fires",        Message = "The darkness yields.",                                                     Domain = "Blessings" },
+                    ["repair"]        = new RitualItemConfig { Enabled = true, Item = "Coal",          HoverText = "Mend your works",            Message = "The fire remembers. Your works are mended.",                               Domain = "Blessings" },
+                    ["giant"]         = new RitualItemConfig { Enabled = true, Item = "YmirRemains",   HoverText = "Become the mountain",        Message = "The mountain answers. You are vast.", Duration = 60f,                     Domain = "Blessings" },
+                    ["ward_bubble"]   = new RitualItemConfig { Enabled = true, Item = "Ruby",          HoverText = "Carry the shield",          Message = "A ward rises. None shall pass.", Duration = 300f,                         Domain = "Blessings" },
+                    ["campfire_ward"] = new RitualItemConfig { Enabled = true, Item = "AmberPearl",    HoverText = "Raise a sanctuary",          Message = "A sanctuary rises. None shall enter.", Duration = 60f,                    Domain = "Blessings" },
+                    ["tar_moat"]      = new RitualItemConfig { Enabled = true, Item = "Obsidian",      HoverText = "Raise a tar moat",           Message = "The earth bleeds black. None shall cross.",                               Domain = "Blessings" },
+                    ["seek_deer"]        = new RitualItemConfig { Enabled = true, Item = "DeerHide",      HoverText = "Hunt the deer",        Message = "He thinks he's alone.",                    Distance = 100f, Domain = "Navigation" },
+                    ["seek_boar"]        = new RitualItemConfig { Enabled = true, Item = "LeatherScraps", HoverText = "Hunt the boar",        Message = "The boar roots nearby.",                   Distance = 100f, Domain = "Navigation" },
+                    ["seek_bear"]        = new RitualItemConfig { Enabled = true, Item = "BJornHide",    HoverText = "Hunt the bear",        Message = "A great shadow waits in the trees.",        Distance = 100f, Domain = "Navigation" },
+                    ["seek_troll"]       = new RitualItemConfig { Enabled = true, Item = "TrollHide",     HoverText = "Hunt the troll",       Message = "The earth shudders.",                       Distance = 100f, Domain = "Navigation" },
+                    ["seek_abomination"] = new RitualItemConfig { Enabled = true, Item = "Root",          HoverText = "Hunt the abomination", Message = "Something ancient stirs in the roots.",    Distance = 100f, Domain = "Navigation" },
+                    ["seek_wolf"]        = new RitualItemConfig { Enabled = true, Item = "WolfPelt",      HoverText = "Hunt the wolf",        Message = "The pack circles.",                         Distance = 100f, Domain = "Navigation" },
+                    ["seek_lox"]         = new RitualItemConfig { Enabled = true, Item = "LoxPelt",       HoverText = "Hunt the lox",         Message = "The plains tremble beneath it.",            Distance = 100f, Domain = "Navigation" },
+                    ["seek_misthare"]    = new RitualItemConfig { Enabled = true, Item = "HareMeat",      HoverText = "Hunt the hare",        Message = "It darts through the mist.",                Distance = 100f, Domain = "Navigation" },
+                    ["seek_asksvin"]     = new RitualItemConfig { Enabled = true, Item = "AskHide",   HoverText = "Hunt the asksvin",     Message = "Ash and ember — it hungers.",               Distance = 100f, Domain = "Navigation" },
+                    ["flaming_sword"] = new RitualItemConfig { Enabled = true, Item = "SurtlingCore",  HoverText = "Summon Dyrnwyn",             Message = "Dyrnwyn answers. Let it burn.", Duration = 60f,                           Domain = "Weapons" },
+                    ["jotun_bane"]    = new RitualItemConfig { Enabled = true, Item = "Ooze",          HoverText = "Summon Jotun Bane",          Message = "Jotun Bane answers the call.", Duration = 60f,                           Domain = "Weapons" },
+                    ["krom"]          = new RitualItemConfig { Enabled = true, Item = "Copper",        HoverText = "Summon Krom",                Message = "Krom rises from the deep.", Duration = 60f,                              Domain = "Weapons" },
+                    ["slayer"]        = new RitualItemConfig { Enabled = true, Item = "Iron",          HoverText = "Summon Slayer",              Message = "Slayer hungers.", Duration = 60f,                                         Domain = "Weapons" },
+                    ["skull_splittur"]= new RitualItemConfig { Enabled = true, Item = "Bloodbag",      HoverText = "Summon Skull Splittur",      Message = "Skull Splittur demands a reckoning.", Duration = 60f,                    Domain = "Weapons" },
+                    ["himminafl"]     = new RitualItemConfig { Enabled = true, Item = "Tin",           HoverText = "Summon Himminafl",           Message = "Himminafl crackles with thunder.", Duration = 60f,                       Domain = "Weapons" },
+                    ["mistwalker"]    = new RitualItemConfig { Enabled = true, Item = "Crystal",       HoverText = "Summon Mistwalker",          Message = "Mistwalker parts the veil.", Duration = 60f,                             Domain = "Weapons" },
                 },
             },
         };
@@ -4435,5 +4719,7 @@ if (rows.Length == 0) return; // no known rituals — fire is just a fire
         public string HoverText { get; set; } = "";
         public string Message   { get; set; } = "";
         public float  Duration  { get; set; } = 0f;
+        public float  Distance  { get; set; } = 0f;
+        public string Domain    { get; set; } = "Blessings";
     }
 }
