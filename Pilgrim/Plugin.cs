@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.3.4")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.3.5")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -94,6 +94,9 @@ namespace EnvReporter
         internal static string CampfireWardFood => Cfg.Rituals.Items.GetValueOrDefault("campfire_ward")?.Item ?? "AmberPearl";
         internal static string RepairFood       => Cfg.Rituals.Items.GetValueOrDefault("repair")?.Item         ?? "Coal";
         internal static string TarMoatFood      => Cfg.Rituals.Items.GetValueOrDefault("tar_moat")?.Item       ?? "Obsidian";
+        internal static string FireWallFood     => Cfg.Rituals.Items.GetValueOrDefault("fire_wall")?.Item      ?? "FlametalNew";
+        internal static string CorpseFood       => Cfg.Rituals.Items.GetValueOrDefault("seek_corpse")?.Item    ?? "Chitin";
+        internal static string MistFood         => Cfg.Rituals.Items.GetValueOrDefault("clear_mist")?.Item     ?? "Wisp";
         internal static string HuntIngredient(HuntDef def) =>
             Cfg.Rituals.Items.GetValueOrDefault(def.Key)?.Item ?? def.DefaultIngredient;
         internal static string? LegendaryIngredientMatch(string prefab)
@@ -148,6 +151,9 @@ namespace EnvReporter
             ("Ruby",          false, "ward_bubble",    "Ruby"),
             ("AmberPearl",    false, "campfire_ward",  "Amber Pearl"),
             ("Obsidian",      false, "tar_moat",       "Obsidian"),
+            ("Chitin",        false, "seek_corpse",    "Chitin"),
+            ("Wisp",          false, "clear_mist",     "Wisp"),
+            ("FlametalNew",   false, "fire_wall",      "Flametal Ore"),
             ("DeerHide",      false, "seek_deer",        "Deer Hide"),
             ("LeatherScraps", false, "seek_boar",        "Leather Scraps"),
             ("BJornHide",     false, "seek_bear",        "Bear Hide"),
@@ -268,6 +274,8 @@ namespace EnvReporter
         internal static float GiantExpiry          = 0f;
         internal static float ShieldBubbleExpiry   = 0f;
         internal static float CampfireWardExpiry   = 0f;
+        internal static Coroutine? ActiveStructureRitual = null;
+        internal static System.Action? ActiveStructureRitualCleanup = null;
         internal static GameObject? ActiveCampfireWard     = null;
         internal static Renderer?   ActiveCampfireWardRend = null;
         internal static float GiantTargetScale     = 1f;
@@ -601,6 +609,26 @@ namespace EnvReporter
                 args.Context.AddString(target == "all" ? "All rituals learned." : $"Learned: {target}");
             });
 
+            new Terminal.ConsoleCommand("ath_ritual_kit",
+                "ath_ritual_kit — spawn one of each ritual ingredient into your inventory", args =>
+            {
+                var player = Player.m_localPlayer;
+                if (player == null) return;
+                int spawned = 0, skipped = 0;
+                var seen = new HashSet<string>();
+                foreach (var (match, prefix, key, _) in Plugin.RitualItemMap)
+                {
+                    string prefabName = prefix
+                        ? (Plugin.Cfg.Rituals.Items.TryGetValue(key, out var rc) ? rc.Item.TrimEnd('*') : match)
+                        : match;
+                    if (!seen.Add(prefabName)) continue;
+                    var added = player.GetInventory().AddItem(prefabName, 1, 1, 0, 0L, "");
+                    if (added != null) spawned++;
+                    else skipped++;
+                }
+                args.Context.AddString($"Ritual kit: {spawned} items added, {skipped} prefabs not found.");
+            });
+
             new Terminal.ConsoleCommand("ath_forget",
                 "ath_forget [ritual|all] — reset ritual discovery", args =>
             {
@@ -908,6 +936,28 @@ namespace EnvReporter
                 if (prefab == null) { args.Context.AddString($"Prefab '{args[1]}' not found."); return; }
                 Object.Instantiate(prefab, player.transform.position, Quaternion.identity);
                 args.Context.AddString($"Spawned {args[1]}");
+            });
+
+            // ── ath_cleanup_vfx ─────────────────────────────────────────────
+            new Terminal.ConsoleCommand("ath_cleanup_vfx",
+                "ath_cleanup_vfx <prefabName> — destroy all ZNet instances of a prefab in the world", args =>
+            {
+                if (args.Length < 2) { args.Context.AddString("Usage: ath_cleanup_vfx <prefabName>"); return; }
+                var targetName = args[1];
+                var scene = ZNetScene.instance;
+                var zdoMan = ZDOMan.instance;
+                if (scene == null || zdoMan == null) { args.Context.AddString("Not ready."); return; }
+                var batch = new List<ZDO>();
+                int idx = 0, count = 0;
+                // GetAllZDOsWithPrefabIterative needs multiple calls until it returns true
+                while (!zdoMan.GetAllZDOsWithPrefabIterative(targetName, batch, ref idx)) { }
+                foreach (var zdo in batch)
+                {
+                    var nview = scene.FindInstance(zdo);
+                    if (nview != null) { ZNetScene.instance.Destroy(nview.gameObject); count++; }
+                    else { zdoMan.DestroyZDO(zdo); count++; }
+                }
+                args.Context.AddString($"Destroyed {count} instances of '{targetName}'.");
             });
 
             // ── ath_upgradecart ─────────────────────────────────────────────
@@ -1891,66 +1941,563 @@ namespace EnvReporter
 
         // ── Tar moat ritual ───────────────────────────────────────────────────
 
-        internal const string TarMoatRPC = "Pilgrim_TarMoat";
+        // ── Structure ritual system ──────────────────────────────────────────
+        // Shared by tar_moat and fire_wall: scan build pieces connected to the
+        // campfire, project to terrain, place a prefab at each point, and apply
+        // a status effect to any character standing in the footprint.
+        // Only the ritual caster spawns ZNet objects (they replicate automatically).
+        // An RPC sends positions + duration + seHash to each peer so they run the
+        // tick coroutine locally — each client applies the SE to characters it owns.
 
-        internal static void RegisterTarMoatRPC()
+        internal const string StructureRitualRPC = "Pilgrim_StructureRitual";
+        internal static readonly HashSet<string> StructureRitualKeys = new HashSet<string> { "tar_moat", "fire_wall" };
+
+        internal static void RegisterStructureRitualRPC()
         {
-            // RPC is notification-only on clients — spawner owns all ZDOs, which replicate automatically.
-            // Clients just need to know the ritual fired (for future VFX/sound hooks).
-            ZRoutedRpc.instance.Register<Vector3>(TarMoatRPC, (long sender, Vector3 pos) =>
+            ZRoutedRpc.instance.Register<ZPackage>(StructureRitualRPC, (long sender, ZPackage pkg) =>
             {
-                Log.LogInfo($"[Pilgrim] Tar moat notification received at {pos}");
+                int count = pkg.ReadInt();
+                var positions = new List<Vector3>(count);
+                for (int i = 0; i < count; i++) positions.Add(pkg.ReadVector3());
+                float duration    = pkg.ReadSingle();
+                int seHash        = pkg.ReadInt();
+                float fireDamage  = pkg.ReadSingle();
+                string vfxPrefab  = pkg.ReadString();
+                float vfxScale    = pkg.ReadSingle();
+                string vfxPrefab2 = pkg.ReadString();
+                var tint = new Color(pkg.ReadSingle(), pkg.ReadSingle(), pkg.ReadSingle(), pkg.ReadSingle());
+                float lightMult    = pkg.ReadSingle();
+                float smokeInterval = pkg.ReadSingle();
+
+                Plugin.plugin.StartCoroutine(StructureRitualTick(positions, duration, seHash, fireDamage,
+                    vfxPrefab, vfxScale: vfxScale, tint: tint, lightMult: lightMult, vfxPrefabName2: vfxPrefab2,
+                    smokeInterval: smokeInterval));
             });
+        }
+
+        internal const bool StructureRitualDebug = true;
+
+        // BFS through physically-connected WearNTear pieces starting from seed.
+        // Adjacency radius is derived per-piece from collider extents so beams
+        // connect end-to-end. Returns terrain-projected points; also outputs the
+        // raw visited piece set for debug flashing.
+        internal static List<Vector3> GetStructureFootprint(IEnumerable<WearNTear> seeds, out HashSet<WearNTear> visited, float spacing = 2f)
+        {
+            const float snapTol = 0.35f;
+            visited = new HashSet<WearNTear>();
+            var queue = new Queue<WearNTear>();
+            foreach (var s in seeds)
+                if (visited.Add(s)) queue.Enqueue(s);
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                var piece = current.GetComponent<Piece>();
+                if (piece == null) continue;
+                var snapPoints = new List<Transform>();
+                piece.GetSnapPoints(snapPoints);
+                foreach (var sp in snapPoints)
+                {
+                    var spPos = sp.position;
+                    foreach (var col in Physics.OverlapSphere(spPos, snapTol + 0.5f))
+                    {
+                        var nb = col.GetComponentInParent<WearNTear>();
+                        if (nb == null || nb == current || !visited.Add(nb)) continue;
+                        var nbPiece = nb.GetComponent<Piece>();
+                        if (nbPiece == null) { visited.Remove(nb); continue; }
+                        var nbSnaps = new List<Transform>();
+                        nbPiece.GetSnapPoints(nbSnaps);
+                        bool snapped = false;
+                        float bestDist = float.MaxValue;
+                        foreach (var nbSp in nbSnaps)
+                        {
+                            float d = Vector3.Distance(nbSp.position, spPos);
+                            if (d < bestDist) bestDist = d;
+                            if (d <= snapTol) { snapped = true; break; }
+                        }
+                        if (snapped)
+                        {
+                            Log.LogInfo($"[Pilgrim] BFS: '{current.gameObject.name}'→'{nb.gameObject.name}' snap dist={bestDist:F3}m at {spPos:F1}");
+                            queue.Enqueue(nb);
+                        }
+                        else visited.Remove(nb);
+                    }
+                }
+            }
+
+            var result = new List<Vector3>();
+            foreach (var wnt in visited)
+            {
+                var col = wnt.GetComponentInChildren<Collider>();
+                if (col == null)
+                {
+                    result.Add(wnt.transform.position);
+                    continue;
+                }
+                var bounds = col.bounds;
+                float sx = bounds.size.x, sz = bounds.size.z;
+                if (sx <= spacing && sz <= spacing)
+                {
+                    result.Add(bounds.center);
+                }
+                else
+                {
+                    Vector3 axis; float len;
+                    if (sx >= sz) { axis = Vector3.right; len = sx; }
+                    else          { axis = Vector3.forward; len = sz; }
+                    int steps = Mathf.Max(1, Mathf.RoundToInt(len / spacing));
+                    Vector3 start = bounds.center - axis * (len * 0.5f);
+                    for (int i = 0; i <= steps; i++)
+                        result.Add(start + axis * (i / (float)steps * len));
+                }
+            }
+            return result;
+        }
+
+        internal static List<GameObject> SpawnPrefabsAt(IEnumerable<Vector3> positions, string prefabName, float scaleMin = 1f, float scaleMax = 1f)
+        {
+            var result = new List<GameObject>();
+            var prefab = ZNetScene.instance?.GetPrefab(prefabName);
+            if (prefab == null) { Log.LogWarning($"[Pilgrim] Prefab not found: {prefabName}"); return result; }
+            bool varyScale = scaleMax > scaleMin;
+            foreach (var pos in positions)
+            {
+                var go = Object.Instantiate(prefab, pos, Quaternion.identity);
+                if (varyScale) go.transform.localScale = Vector3.one * UnityEngine.Random.Range(scaleMin, scaleMax);
+                result.Add(go);
+            }
+            return result;
+        }
+
+        private static GameObject? s_smokePrefab;
+        internal static GameObject? GetSmokePrefab()
+        {
+            if (s_smokePrefab != null) return s_smokePrefab;
+            // Grab from any live SmokeSpawner in the scene (campfire, torch, etc.)
+            var spawner = Object.FindObjectOfType<SmokeSpawner>();
+            s_smokePrefab = spawner?.m_smokePrefab;
+            if (s_smokePrefab != null)
+                Log.LogInfo($"[Pilgrim] Smoke prefab: {s_smokePrefab.name}");
+            else
+                Log.LogWarning("[Pilgrim] No SmokeSpawner found in scene — no smoke");
+            return s_smokePrefab;
+        }
+
+        internal static void TintVfx(GameObject go, Color tint, float lightMult)
+        {
+            if (tint.a > 0f)
+                foreach (var ps in go.GetComponentsInChildren<ParticleSystem>(true))
+                {
+                    var main = ps.main;
+                    main.startColor = new ParticleSystem.MinMaxGradient(tint);
+                }
+            if (lightMult != 1f)
+                foreach (var light in go.GetComponentsInChildren<Light>(true))
+                    light.intensity *= lightMult;
+        }
+
+        internal static Vector3 ProjectToTerrain(Vector3 pos)
+        {
+            int mask = LayerMask.GetMask("terrain");
+            if (Physics.Raycast(new Vector3(pos.x, pos.y + 10f, pos.z), Vector3.down, out var hit, 25f, mask))
+                return new Vector3(pos.x, hit.point.y + 0.05f, pos.z);
+            float h = ZoneSystem.instance?.GetSolidHeight(pos) ?? pos.y;
+            return new Vector3(pos.x, h + 0.05f, pos.z);
+        }
+
+        internal static void RefillTrench(IEnumerable<Vector3> positions, float radius)
+        {
+            foreach (var pos in positions)
+            {
+                var comp = TerrainComp.FindTerrainCompiler(pos);
+                if (comp == null) continue;
+                var go = new GameObject("Pilgrim_TrenchFill");
+                go.transform.position = pos; // pos.y = original surface captured before digging
+                var op = go.AddComponent<TerrainOp>();
+                op.m_settings.m_level       = true;
+                op.m_settings.m_levelRadius = radius * 1.15f;
+                op.m_settings.m_levelOffset = 0f;
+                op.m_settings.m_square      = false;
+                comp.ApplyOperation(op);
+                Object.Destroy(go);
+            }
+            Log.LogInfo($"[Pilgrim] RefillTrench: restored {positions.Count()} points");
+        }
+
+        internal static void DigTrench(IEnumerable<Vector3> positions, float radius = 0.5f, float depth = 0.25f)
+        {
+            foreach (var pos in positions)
+            {
+                var comp = TerrainComp.FindTerrainCompiler(pos);
+                if (comp == null) continue;
+                var go = new GameObject("Pilgrim_TrenchOp");
+                go.transform.position = pos;
+                var op = go.AddComponent<TerrainOp>();
+                op.m_settings.m_level      = true;
+                op.m_settings.m_levelRadius = radius;
+                op.m_settings.m_levelOffset = -depth;
+                op.m_settings.m_square      = false;
+                op.m_settings.m_smooth      = true;
+                op.m_settings.m_smoothRadius = radius * 1.5f;
+                op.m_settings.m_smoothPower  = 2f;
+                comp.ApplyOperation(op);
+                Object.Destroy(go);
+                Log.LogInfo($"[Pilgrim] DigTrench at {pos:F1} r={radius} d={depth}");
+            }
+        }
+
+        internal static void ActivateStructureRitual(
+            Player player, Fireplace fp,
+            string? netPrefabName, string? vfxPrefabName,
+            int seHash, float fireDamage, float duration,
+            string logLabel, string message, string? indicator = null,
+            float spacing = 2f, bool projectToTerrain = false, float xzNoise = 0f,
+            float netScaleMin = 1f, float netScaleMax = 1f, float vfxScale = 1f,
+            bool digTrench = false, float trenchRadius = 0.5f, float trenchDepth = 0.25f,
+            Color tint = default, float lightMult = 1f, string? vfxPrefabName2 = null,
+            int netPrefabMax = 0, float smokeInterval = 0f, bool consumeStructure = false,
+            bool refillTrench = false)
+        {
+            // Seed: pieces physically touching this campfire. Campfires have no snap points
+            // themselves, so we use a tight spatial grab as the first layer only. The BFS
+            // then expands strictly through snap-point connections, so only a freestanding
+            // structure snapped to itself (not to the base) will be captured.
+            var fpPos = fp.transform.position;
+            var seeds = Physics.OverlapSphere(fpPos, 2f)
+                .Select(c => c.GetComponentInParent<WearNTear>())
+                .Where(w => w != null && w.gameObject != fp.gameObject
+                         && Vector3.Distance(w.transform.position, fpPos) <= 2f)
+                .Distinct()
+                .ToList();
+            if (seeds.Count == 0)
+            {
+                player.Message(MessageHud.MessageType.Center, "No structure found at the fire.");
+                return;
+            }
+            Log.LogInfo($"[Pilgrim] {logLabel}: fire at {fp.transform.position:F1}, {seeds.Count} seed(s):");
+            foreach (var s in seeds)
+                Log.LogInfo($"[Pilgrim]   seed '{s.gameObject.name}' at {s.transform.position:F1}  dist={Vector3.Distance(s.transform.position, fp.transform.position):F2}m");
+            var positions = GetStructureFootprint(seeds, out var visitedPieces, spacing);
+            Log.LogInfo($"[Pilgrim] {logLabel}: {visitedPieces.Count} pieces → {positions.Count} footprint points");
+            foreach (var p in visitedPieces)
+                Log.LogInfo($"[Pilgrim]   piece '{p.gameObject.name}' at {p.transform.position:F1}");
+
+            if (consumeStructure)
+            {
+                foreach (var wnt in visitedPieces)
+                {
+                    var zv = wnt.GetComponent<ZNetView>();
+                    if (zv != null && zv.IsValid()) ZNetScene.instance.Destroy(wnt.gameObject);
+                    else Object.Destroy(wnt.gameObject);
+                }
+                Log.LogInfo($"[Pilgrim] {logLabel}: consumed {visitedPieces.Count} structure pieces");
+            }
+
+            // Apply XZ noise then terrain projection
+            for (int i = 0; i < positions.Count; i++)
+            {
+                var pt = positions[i];
+                if (xzNoise > 0f)
+                    pt += new Vector3(UnityEngine.Random.Range(-xzNoise, xzNoise), 0f, UnityEngine.Random.Range(-xzNoise, xzNoise));
+                if (projectToTerrain)
+                    pt = ProjectToTerrain(pt);
+                positions[i] = pt;
+            }
+
+            if (digTrench)
+                DigTrench(positions, trenchRadius, trenchDepth);
+
+            if (StructureRitualDebug)
+                Plugin.plugin.StartCoroutine(FlashPieces(visitedPieces.Select(w => w.gameObject).ToList()));
+
+            // Networked objects — caster spawns, ZDOs replicate to all clients automatically.
+            IEnumerable<Vector3> netPositions = positions;
+            if (netPrefabMax > 0 && positions.Count > netPrefabMax)
+            {
+                var sampled = new List<Vector3>(netPrefabMax);
+                for (int i = 0; i < netPrefabMax; i++)
+                    sampled.Add(positions[i * positions.Count / netPrefabMax]);
+                netPositions = sampled;
+            }
+            List<GameObject>? netSpawned = netPrefabName != null
+                ? SpawnPrefabsAt(netPositions, netPrefabName, netScaleMin, netScaleMax) : null;
+            if (netSpawned != null && (tint.a > 0f || lightMult != 1f))
+                foreach (var go in netSpawned) TintVfx(go, tint, lightMult);
+
+            var pkg = new ZPackage();
+            pkg.Write(positions.Count);
+            foreach (var p in positions) pkg.Write(p);
+            pkg.Write(duration);
+            pkg.Write(seHash);
+            pkg.Write(fireDamage);
+            pkg.Write(vfxPrefabName ?? "");
+            pkg.Write(vfxScale);
+            pkg.Write(vfxPrefabName2 ?? "");
+            pkg.Write(tint.r); pkg.Write(tint.g); pkg.Write(tint.b); pkg.Write(tint.a);
+            pkg.Write(lightMult);
+            pkg.Write(smokeInterval);
+            foreach (var peer in ZNet.instance?.GetPeers() ?? new System.Collections.Generic.List<ZNetPeer>())
+                ZRoutedRpc.instance.InvokeRoutedRPC(peer.m_uid, StructureRitualRPC, pkg);
+
+            player.Message(MessageHud.MessageType.Center, message);
+            Log.LogInfo($"[Pilgrim] {logLabel} raised at {fp.transform.position} ({positions.Count} points)");
+            var vfxSnapshot      = new List<GameObject>(); // populated inside tick, referenced by cleanup
+            var netSnapshot      = netSpawned;
+            var posSnapshot      = refillTrench ? new List<Vector3>(positions) : null;
+            float snapTrenchRad  = trenchRadius;
+            ActiveStructureRitualCleanup = () =>
+            {
+                foreach (var go in vfxSnapshot) if (go != null) Object.Destroy(go);
+                if (netSnapshot != null)
+                    foreach (var go in netSnapshot)
+                    {
+                        if (go == null) continue;
+                        var zv = go.GetComponent<ZNetView>();
+                        if (zv != null && zv.IsValid()) ZNetScene.instance.Destroy(go);
+                        else Object.Destroy(go);
+                    }
+                if (posSnapshot != null) RefillTrench(posSnapshot, snapTrenchRad);
+            };
+            ActiveStructureRitual = Plugin.plugin.StartCoroutine(
+                StructureRitualTick(positions, duration, seHash, fireDamage, vfxPrefabName, netSpawned, indicator, vfxSnapshot, vfxScale, tint, lightMult, vfxPrefabName2, smokeInterval));
+        }
+
+        private static System.Collections.IEnumerator StructureRitualTick(
+            List<Vector3> positions, float duration, int seHash, float fireDamage,
+            string? vfxPrefabName = null, List<GameObject>? netSpawned = null,
+            string? indicator = null, List<GameObject>? vfxSnapshot = null, float vfxScale = 1f,
+            Color tint = default, float lightMult = 1f, string? vfxPrefabName2 = null, float smokeInterval = 0f)
+        {
+            var tick      = new WaitForSeconds(0.5f);
+            float elapsed = 0f;
+            float remaining = duration;
+            int charMask  = LayerMask.GetMask("character", "character_net", "character_ghost");
+            const float hitRadius = 1.5f;
+            // Spawn local VFX once — tracked for cleanup at end
+            var activeVfx = vfxSnapshot ?? new List<GameObject>();
+            bool hasTint = tint.a > 0f || lightMult != 1f;
+            if (!string.IsNullOrEmpty(vfxPrefabName))
+            {
+                var prefab = ZNetScene.instance?.GetPrefab(vfxPrefabName);
+                if (prefab != null)
+                    foreach (var pos in positions)
+                    {
+                        var go = Object.Instantiate(prefab, pos, Quaternion.identity);
+                        if (vfxScale != 1f) go.transform.localScale = Vector3.one * UnityEngine.Random.Range(vfxScale, vfxScale * 1.35f);
+                        if (hasTint) TintVfx(go, tint, lightMult);
+                        activeVfx.Add(go);
+                    }
+            }
+            if (!string.IsNullOrEmpty(vfxPrefabName2))
+            {
+                var prefab2 = ZNetScene.instance?.GetPrefab(vfxPrefabName2);
+                if (prefab2 != null)
+                    foreach (var pos in positions)
+                        activeVfx.Add(Object.Instantiate(prefab2, pos, Quaternion.identity));
+            }
+            if (indicator != null)
+                Player.m_localPlayer?.Message(MessageHud.MessageType.TopLeft, $"{indicator}: {(int)remaining}s");
+            float nextSmoke = smokeInterval > 0f ? smokeInterval : float.MaxValue;
+            while (elapsed < duration)
+            {
+                yield return tick;
+                elapsed    += 0.5f;
+                remaining  -= 0.5f;
+                if (indicator != null && (int)remaining % 10 == 0 && remaining > 0f)
+                    Player.m_localPlayer?.Message(MessageHud.MessageType.TopLeft, $"{indicator}: {(int)remaining}s");
+
+                nextSmoke -= 0.5f;
+                if (nextSmoke <= 0f)
+                {
+                    nextSmoke = smokeInterval;
+                    var smokePrefab = GetSmokePrefab();
+                    if (smokePrefab != null)
+                        foreach (var pos in positions)
+                            Object.Instantiate(smokePrefab, pos + Vector3.up * 0.3f, Quaternion.identity);
+                }
+
+                if (seHash == 0 && fireDamage <= 0f) continue;
+                foreach (var pos in positions)
+                foreach (var col in Physics.OverlapSphere(pos, hitRadius, charMask))
+                {
+                    var ch = col.GetComponentInParent<Character>();
+                    if (ch == null) continue;
+                    var zv = ch.GetComponent<ZNetView>();
+                    if (zv == null || !zv.IsValid() || !zv.IsOwner()) continue;
+                    if (seHash != 0)
+                        ch.GetSEMan().AddStatusEffect(seHash, resetTime: true);
+                    if (fireDamage > 0f)
+                    {
+                        var hit = new HitData();
+                        hit.m_damage.m_fire = fireDamage;
+                        hit.m_point = ch.transform.position;
+                        hit.m_dir   = Vector3.zero;
+                        ch.ApplyDamage(hit, showDamageText: true, triggerEffects: true);
+                    }
+                }
+            }
+            // Natural completion — run cleanup and clear tracking
+            ActiveStructureRitualCleanup?.Invoke();
+            ActiveStructureRitual = null;
+            ActiveStructureRitualCleanup = null;
         }
 
         internal static void ActivateTarMoat(Player player, Fireplace fp, string message)
         {
+            float duration = Cfg.Rituals.Items.GetValueOrDefault("tar_moat")?.Duration ?? 60f;
+            // spacing=100f → one footprint point per piece center (no length subdivision)
+            ActivateStructureRitual(player, fp,
+                netPrefabName: "TarLiquid", vfxPrefabName: null,
+                seHash: SEMan.s_statusEffectTared, fireDamage: 0f,
+                duration, "Tar moat", message, indicator: "Tar moat",
+                spacing: 100f, projectToTerrain: true,
+                netScaleMin: 0.25f, netScaleMax: 0.35f,
+                digTrench: true, trenchRadius: 1.0f, trenchDepth: 2.0f,
+                netPrefabMax: 5, consumeStructure: true, refillTrench: true);
+        }
+
+        internal static void ActivateFireWall(Player player, Fireplace fp, string message)
+        {
+            float duration = Cfg.Rituals.Items.GetValueOrDefault("fire_wall")?.Duration ?? 60f;
+            ActivateStructureRitual(player, fp,
+                netPrefabName: "vfx_Burning", vfxPrefabName: null,
+                seHash: SEMan.s_statusEffectBurning, fireDamage: 5f,
+                duration, "Fire wall", message, indicator: "Fire wall",
+                spacing: 2.5f, projectToTerrain: true, xzNoise: 0.3f,
+                netScaleMin: 1.5f, netScaleMax: 2.0f,
+                lightMult: 0.2f, smokeInterval: 1.5f, consumeStructure: true);
+        }
+
+        // ── Clear mist ritual ────────────────────────────────────────────────
+
+        internal const string ClearMistRPC = "Pilgrim_ClearMist";
+        internal const float  ClearMistRadius = 100f;
+
+        internal static void RegisterClearMistRPC()
+        {
+            ZRoutedRpc.instance.Register<Vector3, float>(ClearMistRPC, (_, pos, duration) =>
+                SpawnDemisterLocal(pos, duration));
+        }
+
+        internal static void SpawnDemisterLocal(Vector3 pos, float duration)
+        {
+            // Spawn a stationary demister at the campfire position.
+            // ParticleSystemForceField is what ParticleMist reads; Demister registers it in m_instances via OnEnable.
+            var root = new GameObject("Pilgrim_Demister");
+            root.transform.position = pos;
+
+            var ff = root.AddComponent<ParticleSystemForceField>();
+            ff.shape    = ParticleSystemForceFieldShape.Sphere;
+            ff.endRange = 5f;
+            ff.gravity  = new ParticleSystem.MinMaxCurve(-2f);
+
+            var demister = root.AddComponent<Demister>();
+            demister.m_forceField = ff;
+
+            Object.Destroy(root, duration);
+            plugin.StartCoroutine(ExpandDemister(ff, 5f, ClearMistRadius, expandTime: 20f));
+            Log.LogInfo($"[Pilgrim] Demister spawned at {pos} radius {ClearMistRadius}m for {duration}s");
+        }
+
+        private static System.Collections.IEnumerator ExpandDemister(ParticleSystemForceField ff, float from, float to, float expandTime)
+        {
+            float elapsed = 0f;
+            while (elapsed < expandTime && ff != null)
+            {
+                elapsed += Time.deltaTime;
+                ff.endRange = Mathf.Lerp(from, to, elapsed / expandTime);
+                yield return null;
+            }
+            if (ff != null) ff.endRange = to;
+        }
+
+        internal static void ActivateClearMist(Player player, Fireplace fp, string message, float mult = 1f)
+        {
+            float duration = (Cfg.Rituals.Items.GetValueOrDefault("clear_mist")?.Duration ?? 120f) * mult;
             var pos = fp.transform.position;
-            var spawned = SpawnTarMoat(pos);
+
+            SpawnDemisterLocal(pos, duration);
+
             foreach (var peer in ZNet.instance?.GetPeers() ?? new System.Collections.Generic.List<ZNetPeer>())
-                ZRoutedRpc.instance.InvokeRoutedRPC(peer.m_uid, TarMoatRPC, pos);
+                ZRoutedRpc.instance.InvokeRoutedRPC(peer.m_uid, ClearMistRPC, pos, duration);
+
             player.Message(MessageHud.MessageType.Center, message);
-            Log.LogInfo($"[Pilgrim] Tar moat raised at {pos} ({spawned.Count} pieces)");
-            // Auto-remove after 60s — ZNetScene.Destroy replicates to all clients
-            if (spawned.Count > 0)
-                Plugin.plugin.StartCoroutine(RemoveTarMoat(spawned, 60f));
+            Log.LogInfo($"[Pilgrim] Clear mist ritual at {pos} for {duration}s");
         }
 
-        private static System.Collections.IEnumerator RemoveTarMoat(List<GameObject> pieces, float delay)
+        // ── Corpse seek ritual ───────────────────────────────────────────────
+
+        internal static System.Action<Vector3>? _pendingCorpseCallback;
+
+        internal static void ActivateCorpseSeek(Player player, string message)
         {
-            yield return new WaitForSeconds(delay);
-            foreach (var go in pieces)
+            long playerID = Game.instance.GetPlayerProfile().GetPlayerID();
+
+            if (ZNet.instance != null && ZNet.instance.IsServer())
             {
-                if (go == null) continue;
-                var zv = go.GetComponent<ZNetView>();
-                if (zv != null && zv.IsValid())
-                    ZNetScene.instance.Destroy(go);
-                else if (go != null)
-                    Object.Destroy(go);
+                var pos = FindNewestTombstonePos(playerID);
+                CompleteCorpseSeek(player, pos, message);
             }
-            Log.LogInfo($"[Pilgrim] Tar moat expired, removed {pieces.Count} pieces");
+            else
+            {
+                _pendingCorpseCallback = pos => CompleteCorpseSeek(player, pos, message);
+                ZRoutedRpc.instance.InvokeRoutedRPC("Pilgrim_CorpseSeekRequest", playerID);
+            }
         }
 
-        internal static List<GameObject> SpawnTarMoat(Vector3 center)
+        static Dictionary<ZDOID, ZDO>? _zdoManObjects;
+        static Dictionary<ZDOID, ZDO>? GetAllZDOs()
         {
-            var result = new List<GameObject>();
-            var tarPrefab = ZNetScene.instance?.GetPrefab("TarLiquid");
-            if (tarPrefab == null) { Log.LogWarning("[Pilgrim] TarLiquid prefab not found"); return result; }
+            if (_zdoManObjects != null) return _zdoManObjects;
+            var f = typeof(ZDOMan).GetField("m_objectsByID",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _zdoManObjects = f?.GetValue(ZDOMan.instance) as Dictionary<ZDOID, ZDO>;
+            return _zdoManObjects;
+        }
 
-            const float innerRadius = 27f;
-            const float outerRadius = 33f;
-            const float spacing     = 7f;
+        internal static Vector3 FindNewestTombstonePos(long playerID)
+        {
+            var all = GetAllZDOs();
+            if (all == null) return Vector3.zero;
 
-            for (float x = -outerRadius; x <= outerRadius; x += spacing)
-            for (float z = -outerRadius; z <= outerRadius; z += spacing)
+            int tombHash = "Player_tombstone".GetStableHashCode();
+            ZDO? newest = null;
+            long newestTime = 0;
+            foreach (var zdo in all.Values)
             {
-                float dist = Mathf.Sqrt(x * x + z * z);
-                if (dist < innerRadius || dist > outerRadius) continue;
-                var spawnPos = new Vector3(center.x + x, center.y, center.z + z);
-                spawnPos.y = (ZoneSystem.instance?.GetSolidHeight(spawnPos) ?? center.y) - 0.3f;
-                result.Add(Object.Instantiate(tarPrefab, spawnPos, Quaternion.identity));
+                if (zdo.GetPrefab() != tombHash) continue;
+                if (zdo.GetLong(ZDOVars.s_owner, 0L) != playerID) continue;
+                long t = zdo.GetLong(ZDOVars.s_timeOfDeath, 0L);
+                if (t > newestTime) { newestTime = t; newest = zdo; }
             }
-            return result;
+            return newest?.GetPosition() ?? Vector3.zero;
+        }
+
+        internal static void CompleteCorpseSeek(Player player, Vector3 pos, string message)
+        {
+            if (pos == Vector3.zero)
+            {
+                player.Message(MessageHud.MessageType.Center, "No grave found in this world.");
+                return;
+            }
+            player.Message(MessageHud.MessageType.Center, message);
+            player.TeleportTo(pos + Vector3.up, player.transform.rotation, distantTeleport: true);
+            ((MonoBehaviour)plugin).StartCoroutine(CorpseGraceRoutine(player));
+        }
+
+        private static System.Collections.IEnumerator CorpseGraceRoutine(Player player)
+        {
+            float duration = 30f;
+            player.m_aiSkipTarget = true;
+            player.Message(MessageHud.MessageType.TopLeft, $"Grace: {(int)duration}s");
+            while (duration > 0f)
+            {
+                yield return new WaitForSeconds(1f);
+                duration -= 1f;
+                if (player == null) yield break;
+                if ((int)duration % 10 == 0 && duration > 0f)
+                    player.Message(MessageHud.MessageType.TopLeft, $"Grace: {(int)duration}s");
+            }
+            if (player != null) player.m_aiSkipTarget = false;
         }
 
         // ── Legendary weapon rituals ─────────────────────────────────────────
@@ -2071,6 +2618,7 @@ namespace EnvReporter
             if (HomeEnvExpiry      > 0f) return true;
             if (ShieldBubbleExpiry > 0f && Time.time < ShieldBubbleExpiry) return true;
             if (ActiveCampfireWard != null) return true;
+            if (ActiveStructureRitual != null) return true;
             // Guiding wind SE may outlive SeekEnvExpiry
             if (player.GetSEMan().HaveStatusEffect(GuidingWindSE?.NameHash() ?? 0)) return true;
             return false;
@@ -2127,6 +2675,14 @@ namespace EnvReporter
                 SeekEnvExpiry = 0f;
                 BossSeekTarget = null;
                 player.GetSEMan().RemoveStatusEffect(GuidingWindSE?.NameHash() ?? 0);
+            }
+
+            if (ActiveStructureRitual != null)
+            {
+                Plugin.plugin.StopCoroutine(ActiveStructureRitual);
+                ActiveStructureRitualCleanup?.Invoke();
+                ActiveStructureRitual = null;
+                ActiveStructureRitualCleanup = null;
             }
 
             // Remaining env-based: zero expiries and broadcast clear to all clients.
@@ -2441,7 +2997,26 @@ namespace EnvReporter
                 string domainKnownStr = $" <color={(domainKnown < domainTotal ? "yellow" : "green")}>{domainKnown}/{domainTotal}</color>";
                 __result += $"\n<color=orange>{currentDomain}{domainKnownStr}</color>";
                 foreach (var (key, item, hoverText) in pageRituals)
-                    __result += $"\n  <color=yellow>{item}</color> — {hoverText}";
+                {
+                    string structureTag = "";
+                    if (Plugin.StructureRitualKeys.Contains(key))
+                    {
+                        var fpPos = __instance.transform.position;
+                        var seeds = Physics.OverlapSphere(fpPos, 2f)
+                            .Select(c => c.GetComponentInParent<WearNTear>())
+                            .Where(w => w != null && w.gameObject != __instance.gameObject
+                                     && Vector3.Distance(w.transform.position, fpPos) <= 2f)
+                            .Distinct().ToList();
+                        if (seeds.Count == 0)
+                            structureTag = "\n    <color=red>↳ build a structure around this fire</color>";
+                        else
+                        {
+                            Plugin.GetStructureFootprint(seeds, out var visited);
+                            structureTag = $"\n    <color=green>↳ {visited.Count} pieces connected — will be consumed</color>";
+                        }
+                    }
+                    __result += $"\n  <color=yellow>{item}</color> — {hoverText}{structureTag}";
+                }
                 string pageInfo = pageCount > 1 ? $" <color=grey>({Plugin.HintPage + 1}/{pageCount})</color>" : "";
                 string rHint   = pageCount > 1 ? $"  <color=grey>[R] Next page</color>" : "";
                 __result += $"\n<color=grey>[H] Hide</color>{rHint}{pageInfo}</size>";
@@ -2504,6 +3079,9 @@ namespace EnvReporter
                          || (prefab == Plugin.CampfireWardFood && RitualEnabled("campfire_ward"))
                          || (prefab == Plugin.RepairFood       && RitualEnabled("repair"))
                          || (prefab == Plugin.TarMoatFood      && RitualEnabled("tar_moat"))
+                         || (prefab == Plugin.FireWallFood     && RitualEnabled("fire_wall"))
+                         || (prefab == Plugin.CorpseFood       && RitualEnabled("seek_corpse"))
+                         || (prefab == Plugin.MistFood         && RitualEnabled("clear_mist"))
                          || Plugin.HuntDefs.Any(d => prefab == Plugin.HuntIngredient(d) && RitualEnabled(d.Key))
                          || (Plugin.LegendaryIngredientMatch(prefab) is string lk && RitualEnabled(lk));
             if (!isRitual) return true;
@@ -2611,6 +3189,18 @@ namespace EnvReporter
             if (prefab == Plugin.TarMoatFood && RitualEnabled("tar_moat"))
             {
                 Consume(); Plugin.ActivateTarMoat(__instance, fp, RitualMsg("tar_moat", "The earth bleeds black. None shall cross.")); return false;
+            }
+            if (prefab == Plugin.FireWallFood && RitualEnabled("fire_wall"))
+            {
+                Consume(); Plugin.ActivateFireWall(__instance, fp, RitualMsg("fire_wall", "The structure burns. None shall pass.")); return false;
+            }
+            if (prefab == Plugin.CorpseFood && RitualEnabled("seek_corpse"))
+            {
+                Consume(); Plugin.ActivateCorpseSeek(__instance, RitualMsg("seek_corpse", "The bones remember. Return to what was lost.")); return false;
+            }
+            if (prefab == Plugin.MistFood && RitualEnabled("clear_mist"))
+            {
+                Consume(); Plugin.ActivateClearMist(__instance, fp, RitualMsg("clear_mist", "The wisp answers. Mist retreats."), ritualMult); return false;
             }
             var huntMatch = System.Array.Find(Plugin.HuntDefs, d => prefab == Plugin.HuntIngredient(d) && RitualEnabled(d.Key));
             if (huntMatch.Key != null)
@@ -3647,7 +4237,8 @@ namespace EnvReporter
         {
             Plugin.RegisterShieldBubbleRPC();
             Plugin.RegisterCampfireWardRPC();
-            Plugin.RegisterTarMoatRPC();
+            Plugin.RegisterStructureRitualRPC();
+            Plugin.RegisterClearMistRPC();
             ZRoutedRpc.instance.Register<Vector3, float>("Pilgrim_SendBird", (_, dir, speed) =>
                 Plugin.Scheduler?.SendBird(dir, speed));
 
@@ -3715,6 +4306,22 @@ namespace EnvReporter
                 }
                 Plugin._pendingLocationsCallback?.Invoke(results);
                 Plugin._pendingLocationsCallback = null;
+            });
+
+            // Corpse seek: server finds newest tombstone ZDO for the given playerID
+            ZRoutedRpc.instance.Register<long>("Pilgrim_CorpseSeekRequest", (senderPeer, playerID) =>
+            {
+                var pos = Plugin.FindNewestTombstonePos(playerID);
+                ZRoutedRpc.instance.InvokeRoutedRPC(senderPeer, "Pilgrim_CorpseSeekResponse", pos);
+            });
+            ZRoutedRpc.instance.Register<Vector3>("Pilgrim_CorpseSeekResponse", (_, pos) =>
+            {
+                var player = Player.m_localPlayer;
+                if (player == null) return;
+                var msg = Plugin.Cfg.Rituals.Items.GetValueOrDefault("seek_corpse")?.Message
+                          ?? "The bones remember. Return to what was lost.";
+                Plugin.CompleteCorpseSeek(player, pos, msg);
+                Plugin._pendingCorpseCallback = null;
             });
 
             // Client-side: receive a seek target from the ritual caller and apply locally
@@ -4657,7 +5264,10 @@ namespace EnvReporter
                     ["giant"]         = new RitualItemConfig { Enabled = true, Item = "YmirRemains",   HoverText = "Become the mountain",        Message = "The mountain answers. You are vast.", Duration = 60f,                     Domain = "Blessings" },
                     ["ward_bubble"]   = new RitualItemConfig { Enabled = true, Item = "Ruby",          HoverText = "Carry the shield",          Message = "A ward rises. None shall pass.", Duration = 300f,                         Domain = "Blessings" },
                     ["campfire_ward"] = new RitualItemConfig { Enabled = true, Item = "AmberPearl",    HoverText = "Raise a sanctuary",          Message = "A sanctuary rises. None shall enter.", Duration = 60f,                    Domain = "Blessings" },
-                    ["tar_moat"]      = new RitualItemConfig { Enabled = true, Item = "Obsidian",      HoverText = "Raise a tar moat",           Message = "The earth bleeds black. None shall cross.",                               Domain = "Blessings" },
+                    ["clear_mist"]    = new RitualItemConfig { Enabled = true, Item = "Wisp",        HoverText = "Push the mist away",         Message = "The wisp answers. Mist retreats.", Duration = 120f,                        Domain = "Blessings" },
+                    ["seek_corpse"]   = new RitualItemConfig { Enabled = true, Item = "Chitin",      HoverText = "Seek your corpse",           Message = "The bones remember. Return to what was lost.",                             Domain = "Navigation" },
+                    ["tar_moat"]      = new RitualItemConfig { Enabled = false, Item = "Obsidian",     HoverText = "Raise a tar moat",           Message = "The earth bleeds black. None shall cross.",        Duration = 60f,       Domain = "Blessings" },
+                    ["fire_wall"]     = new RitualItemConfig { Enabled = true, Item = "FlametalNew",   HoverText = "Ignite the structure",        Message = "The structure burns. None shall pass.",             Duration = 60f,       Domain = "Blessings" },
                     ["seek_deer"]        = new RitualItemConfig { Enabled = true, Item = "DeerHide",      HoverText = "Hunt the deer",        Message = "He thinks he's alone.",                    Distance = 100f, Domain = "Navigation" },
                     ["seek_boar"]        = new RitualItemConfig { Enabled = true, Item = "LeatherScraps", HoverText = "Hunt the boar",        Message = "The boar roots nearby.",                   Distance = 100f, Domain = "Navigation" },
                     ["seek_bear"]        = new RitualItemConfig { Enabled = true, Item = "BJornHide",    HoverText = "Hunt the bear",        Message = "A great shadow waits in the trees.",        Distance = 100f, Domain = "Navigation" },

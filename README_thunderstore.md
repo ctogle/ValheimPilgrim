@@ -7,28 +7,11 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
 3. Increased storage for ships so you don't have to sail with a cart.
 4. Fire offering rituals:
    - Seek the next altar
-   - Restore your power
    - Seek your bed
-   - Fall without fear
    - Seek a merchant
    - Seek the nearest dungeon
-   - Clear the skies
-   - Walk on water
-   - Bless your crops
    - Seek a fellow pilgrim
-   - Kindle nearby fires
-   - Tame the flock
-   - Ripen the mead
-   - Become the mountain
-   - Summon Dyrnwyn
-   - Summon Jotun Bane
-   - Summon Krom
-   - Summon Slayer
-   - Summon Skull Splittur
-   - Summon Himminafl
-   - Summon Mistwalker
-   - Carry the shield
-   - Raise a sanctuary
+   - Seek your corpse
    - Hunt the deer
    - Hunt the boar
    - Hunt the bear
@@ -38,6 +21,27 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
    - Hunt the lox
    - Hunt the hare
    - Hunt the asksvin
+   - Restore your power
+   - Fall without fear
+   - Clear the skies
+   - Walk on water
+   - Bless your crops
+   - Tame the flock
+   - Ripen the mead
+   - Kindle nearby fires
+   - Mend your works
+   - Become the mountain
+   - Carry the shield
+   - Raise a sanctuary
+   - Push the mist away
+   - Ignite the structure
+   - Summon Dyrnwyn
+   - Summon Jotun Bane
+   - Summon Krom
+   - Summon Slayer
+   - Summon Skull Splittur
+   - Summon Himminafl
+   - Summon Mistwalker
 
 ---
 
