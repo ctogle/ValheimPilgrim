@@ -9,3 +9,4 @@
 | 0.3.4   | 2 new rituals: ward the campfire (player shield bubble, Ruby) and raise a sanctuary (campfire NoMonsters ward, Amber Pearl); ritual hint pagination (R cycles pages); ath_inspect flashes structure pieces green; ath_wardmat command for live material swapping |
 | 0.3.5   | 9 hunt rituals (deer through asksvin) with biome-matched spawns, 1-star + 1.8x scale, crow guidance; legendary weapon logout fix; dungeon seeker adds fuling camp |
 | 0.3.6   | Structural ritual system; misc fixes and improvements |
+| 0.3.7   | Version bump |
