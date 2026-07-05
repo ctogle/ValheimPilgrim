@@ -97,6 +97,15 @@ namespace EnvReporter
         internal static string FireWallFood     => Cfg.Rituals.Items.GetValueOrDefault("fire_wall")?.Item      ?? "FlametalNew";
         internal static string CorpseFood       => Cfg.Rituals.Items.GetValueOrDefault("seek_corpse")?.Item    ?? "Chitin";
         internal static string MistFood         => Cfg.Rituals.Items.GetValueOrDefault("clear_mist")?.Item     ?? "Wisp";
+        internal static string TreeStandFood    => Cfg.Rituals.Items.GetValueOrDefault("tree_stand")?.Item     ?? "FirCone";
+        internal static readonly Dictionary<string, string> TreeStandSeeds = new()
+        {
+            { "FirCone",    "FirTree"    },
+            { "PineCone",   "Pinetree_01" },
+            { "Acorn",      "Oak1"       },
+            { "BeechSeeds", "Beech1"     },
+            { "BirchSeeds", "Birch1"     },
+        };
         internal static string HuntIngredient(HuntDef def) =>
             Cfg.Rituals.Items.GetValueOrDefault(def.Key)?.Item ?? def.DefaultIngredient;
         internal static string? LegendaryIngredientMatch(string prefab)
@@ -133,30 +142,35 @@ namespace EnvReporter
         // (prefab, isPrefix, ritualKey, displayName) — order matters for wildcard checks
         internal static readonly (string Match, bool Prefix, string Key, string Display)[] RitualItemMap =
         {
-            ("RawMeat",       false, "seek_altar",     "Boar Meat"),
+            ("BjornMeat",     false, "seek_altar",     "Bear Meat"),
             ("Dandelion",     false, "seek_bed",       "Dandelion"),
             ("Coins",         false, "seek_trader",    "Coins"),
-            ("Trophy",        true,  "seek_dungeon",   "a Trophy"),
+            ("Trophy",        true,  "seek_dungeon",   "Trophy"),
             ("Flint",         false, "seek_player",    "Flint"),
             ("Mushroom",      true,  "restore_power",  "Mushroom"),
             ("Feathers",      false, "feather_fall",   "Feathers"),
             ("GreydwarfEye",  false, "clear_skies",    "Greydwarf Eye"),
             ("Stone",         false, "water_walk",     "Stone"),
             ("AncientSeed",   false, "growth",         "Ancient Seed"),
+            ("FirCone",       false, "tree_stand",     "Tree Seeds"),
+            ("PineCone",      false, "tree_stand",     "a tree seed"),
+            ("Acorn",         false, "tree_stand",     "a tree seed"),
+            ("BeechSeeds",    false, "tree_stand",     "a tree seed"),
+            ("BirchSeeds",    false, "tree_stand",     "a tree seed"),
             ("BoneFragments", false, "tame_flock",     "Bone Fragments"),
             ("Barley",        false, "mead_ripen",     "Barley"),
             ("Resin",         false, "kindle",         "Resin"),
             ("Coal",          false, "repair",         "Coal"),
             ("YmirRemains",   false, "giant",          "Ymir Flesh"),
-            ("Ruby",          false, "ward_bubble",    "Ruby"),
+            ("Amber",         false, "ward_bubble",    "Amber"),
             ("AmberPearl",    false, "campfire_ward",  "Amber Pearl"),
             ("Obsidian",      false, "tar_moat",       "Obsidian"),
             ("Chitin",        false, "seek_corpse",    "Chitin"),
             ("Wisp",          false, "clear_mist",     "Wisp"),
-            ("FlametalNew",   false, "fire_wall",      "Flametal Ore"),
+            ("Ruby",          false, "fire_wall",      "Ruby"),
             ("DeerHide",      false, "seek_deer",        "Deer Hide"),
             ("LeatherScraps", false, "seek_boar",        "Leather Scraps"),
-            ("BJornHide",     false, "seek_bear",        "Bear Hide"),
+            ("BjornHide",     false, "seek_bear",        "Bear Hide"),
             ("TrollHide",     false, "seek_troll",       "Troll Hide"),
             ("Root",          false, "seek_abomination", "Root"),
             ("WolfPelt",      false, "seek_wolf",        "Wolf Pelt"),
@@ -199,7 +213,7 @@ namespace EnvReporter
         {
             new HuntDef { Key="seek_deer",        Prefab="Deer",        DefaultIngredient="DeerHide",      Biome=Heightmap.Biome.Meadows,     Scale=1.8f, DefaultHoverText="Hunt the deer",        DefaultMessage="He thinks he's alone.",                   DefaultDistance=100f },
             new HuntDef { Key="seek_boar",        Prefab="Boar",        DefaultIngredient="LeatherScraps", Biome=Heightmap.Biome.Meadows,     Scale=1.8f, DefaultHoverText="Hunt the boar",        DefaultMessage="The boar roots nearby.",                   DefaultDistance=100f },
-            new HuntDef { Key="seek_bear",        Prefab="Bjorn",       DefaultIngredient="BJornHide",      Biome=Heightmap.Biome.BlackForest, Scale=1.8f, DefaultHoverText="Hunt the bear",        DefaultMessage="A great shadow waits in the trees.",       DefaultDistance=100f },
+            new HuntDef { Key="seek_bear",        Prefab="Bjorn",       DefaultIngredient="BjornHide",      Biome=Heightmap.Biome.BlackForest, Scale=1.8f, DefaultHoverText="Hunt the bear",        DefaultMessage="A great shadow waits in the trees.",       DefaultDistance=100f },
             new HuntDef { Key="seek_troll",       Prefab="Troll",       DefaultIngredient="TrollHide",     Biome=Heightmap.Biome.BlackForest, Scale=1.8f, DefaultHoverText="Hunt the troll",       DefaultMessage="The earth shudders.",                      DefaultDistance=100f },
             new HuntDef { Key="seek_abomination", Prefab="Abomination", DefaultIngredient="Root",          Biome=Heightmap.Biome.Swamp,       Scale=1.8f, DefaultHoverText="Hunt the abomination", DefaultMessage="Something ancient stirs in the roots.",    DefaultDistance=100f },
             new HuntDef { Key="seek_wolf",        Prefab="Wolf",        DefaultIngredient="WolfPelt",      Biome=Heightmap.Biome.Mountain,    Scale=1.8f, DefaultHoverText="Hunt the wolf",        DefaultMessage="The pack circles.",                        DefaultDistance=100f },
@@ -266,6 +280,7 @@ namespace EnvReporter
         internal const  int   HintPageSize         = 15;
         internal static bool  TameBlessingActive   = false;
         internal static bool  MeadBlessingActive   = false;
+        internal const  string TreeStandKey        = "ath_tree_stand_positions";
         internal static float FlamingSwordExpiry     = 0f; // alias kept for expiry-check sites
         internal static float LegendaryExpiry       => FlamingSwordExpiry;
         internal static LegendaryDef _activeLegendaryDef;
@@ -1046,25 +1061,27 @@ namespace EnvReporter
         static string?  _seekPendingMessage;
         static float    _seekPendingMult;
         static Terminal? _seekPendingCtx;
+        static string?  _seekPendingIngredient;
 
-        internal static void ActivateSeek(Terminal? ctx = null, string message = "The wind stirs.", float mult = 1f)
+        internal static void ActivateSeek(Terminal? ctx = null, string message = "The wind stirs.", float mult = 1f, string? ingredient = null)
         {
             var player = Player.m_localPlayer;
             if (player == null) return;
 
             SeekOverrideTarget = null;
             BossSeekTarget = null;
-            var (bossName, prefabName) = GetNextBoss();
+            var (bossName, prefabName) = GetNextBoss(player);
             if (bossName == null)
             {
                 Msg(ctx, "All known bosses defeated. The path is your own.");
                 return;
             }
 
-            _seekPendingBossName = bossName;
-            _seekPendingMessage  = message;
-            _seekPendingMult     = mult;
-            _seekPendingCtx      = ctx;
+            _seekPendingBossName   = bossName;
+            _seekPendingMessage    = message;
+            _seekPendingMult       = mult;
+            _seekPendingCtx        = ctx;
+            _seekPendingIngredient = ingredient;
 
             if (ZNet.instance != null && ZNet.instance.IsServer())
             {
@@ -1086,22 +1103,29 @@ namespace EnvReporter
             var player = Player.m_localPlayer;
             if (player == null) return;
 
-            string bossName = _seekPendingBossName ?? "???";
-            string message  = _seekPendingMessage  ?? "The wind stirs.";
-            float  mult     = _seekPendingMult;
-            var    ctx      = _seekPendingCtx;
-            _seekPendingBossName = null;
-            _seekPendingCtx      = null;
+            string bossName    = _seekPendingBossName   ?? "???";
+            string message     = _seekPendingMessage    ?? "The wind stirs.";
+            float  mult        = _seekPendingMult;
+            var    ctx         = _seekPendingCtx;
+            string? ingredient = _seekPendingIngredient;
+            _seekPendingBossName   = null;
+            _seekPendingCtx        = null;
+            _seekPendingIngredient = null;
 
             bool altarFound = altarPos != Vector3.zero;
 
-            BroadcastSeekTarget("boss", altarFound ? altarPos : Vector3.zero, SeekEnvDuration * mult, "LastLight", "Twilight_Clear");
-
             if (!altarFound)
             {
-                player.Message(MessageHud.MessageType.TopLeft, $"Seeking {bossName}... altar not yet discovered.");
+                if (ingredient != null)
+                {
+                    player.GetInventory().AddItem(ingredient, 1, 1, 0, 0, "");
+                    RitualCooldownRemaining = 0f;
+                }
+                player.Message(MessageHud.MessageType.Center, $"Seeking {bossName} — altar not yet revealed.");
                 return;
             }
+
+            BroadcastSeekTarget("boss", altarPos, SeekEnvDuration * mult, "LastLight", "Twilight_Clear");
 
             Vector3 playerPos = player.transform.position;
             float dx    = altarPos.x - playerPos.x;
@@ -2444,6 +2468,26 @@ namespace EnvReporter
             }
         }
 
+        internal static void ActivateTreeStand(Player player, Fireplace fp, string seedPrefab, string message)
+        {
+            // BFS the structure to collect terrain positions, store in customData for wake
+            var fpPos = fp.transform.position;
+            var seeds = Physics.OverlapSphere(fpPos, 2f)
+                .Select(c => c.GetComponentInParent<WearNTear>())
+                .Where(w => w != null && w.gameObject != fp.gameObject
+                         && Vector3.Distance(w.transform.position, fpPos) <= 2f)
+                .Distinct().ToList();
+            if (seeds.Count == 0)
+            { player.Message(MessageHud.MessageType.Center, "Build a structure around this fire first."); return; }
+
+            GetStructureFootprint(seeds, out var visited);
+            var positions = visited.Select(w => ProjectToTerrain(w.transform.position)).ToList();
+            // Serialize as "seedPrefab;x,y,z|x,y,z|..."
+            string posStr  = string.Join("|", positions.Select(p => $"{p.x:F2},{p.y:F2},{p.z:F2}"));
+            player.m_customData[TreeStandKey] = $"{seedPrefab};{posStr}";
+            player.Message(MessageHud.MessageType.Center, message);
+        }
+
         static Dictionary<ZDOID, ZDO>? _zdoManObjects;
         static Dictionary<ZDOID, ZDO>? GetAllZDOs()
         {
@@ -2771,13 +2815,30 @@ namespace EnvReporter
             "defeated_fader",
         };
 
-        internal static (string? boss, string? prefab) GetNextBoss()
+        // Per-player progression: check if player personally collected the boss trophy
+        static readonly string[] BossTrophies =
+        {
+            "TrophyEikthyr",
+            "TrophyTheElder",
+            "TrophyBonemass",
+            "TrophyDragonQueen",
+            "TrophyGoblinKing",
+            "TrophySeekerQueen",
+            "TrophyFader",
+        };
+
+        internal static (string? boss, string? prefab) GetNextBoss(Player? player = null)
         {
             var zs = ZoneSystem.instance;
             if (zs == null) return (null, null);
             for (int i = 0; i < BossChain.Length; i++)
-                if (i >= BossKeys.Length || !zs.GetGlobalKey(BossKeys[i]))
+            {
+                bool defeated = player != null && i < BossTrophies.Length
+                    ? player.GetTrophies().Contains(BossTrophies[i])
+                    : i < BossKeys.Length && zs.GetGlobalKey(BossKeys[i]);
+                if (!defeated)
                     return (BossChain[i].boss, BossChain[i].prefab);
+            }
             return (null, null);
         }
 
@@ -2938,6 +2999,10 @@ namespace EnvReporter
     [HarmonyPatch(typeof(Fireplace), "GetHoverText")]
     class FireplaceHoverPatch
     {
+        // Last completed async result per fireplace instance ID
+        static readonly Dictionary<int, string> _structureTag  = new();
+        // When we last kicked off a refresh per fireplace
+        static readonly Dictionary<int, float>  _structureNext = new();
 
         static void Postfix(Fireplace __instance, ref string __result)
         {
@@ -2959,15 +3024,17 @@ namespace EnvReporter
             var allKeys   = new System.Collections.Generic.HashSet<string>();
             var knownKeys = new System.Collections.Generic.HashSet<string>();
 
-            foreach (var (_, _, key, _) in Plugin.RitualItemMap)
+            var seenKeys = new HashSet<string>();
+            foreach (var (_, _, key, display) in Plugin.RitualItemMap)
             {
+                if (!seenKeys.Add(key)) continue;
                 if (!items.TryGetValue(key, out var rc) || !rc.Enabled) continue;
                 allKeys.Add(key);
                 if (player != null && Plugin.IsRitualKnown(player, key)) knownKeys.Add(key);
                 if (!KnownAndEnabled(key)) continue;
                 string domain = string.IsNullOrEmpty(rc.Domain) ? "Blessings" : rc.Domain;
                 if (!domainMap.ContainsKey(domain)) { domainMap[domain] = new System.Collections.Generic.List<(string,string,string)>(); domainOrder.Add(domain); }
-                domainMap[domain].Add((key, rc.Item, rc.HoverText));
+                domainMap[domain].Add((key, display, rc.HoverText));
             }
 
             if (domainOrder.Count == 0) return;
@@ -2979,8 +3046,10 @@ namespace EnvReporter
 
             // Known/total for this domain
             int domainKnown = 0, domainTotal = 0;
+            var seenCount = new HashSet<string>();
             foreach (var (_, _, k, _) in Plugin.RitualItemMap)
             {
+                if (!seenCount.Add(k)) continue;
                 if (!items.TryGetValue(k, out var rc2) || !rc2.Enabled) continue;
                 string d = string.IsNullOrEmpty(rc2.Domain) ? "Blessings" : rc2.Domain;
                 if (d != currentDomain) continue;
@@ -3001,18 +3070,68 @@ namespace EnvReporter
                     string structureTag = "";
                     if (Plugin.StructureRitualKeys.Contains(key))
                     {
-                        var fpPos = __instance.transform.position;
-                        var seeds = Physics.OverlapSphere(fpPos, 2f)
-                            .Select(c => c.GetComponentInParent<WearNTear>())
-                            .Where(w => w != null && w.gameObject != __instance.gameObject
-                                     && Vector3.Distance(w.transform.position, fpPos) <= 2f)
-                            .Distinct().ToList();
-                        if (seeds.Count == 0)
-                            structureTag = "\n    <color=red>↳ build a structure around this fire</color>";
-                        else
+                        int id = __instance.GetInstanceID();
+                        float now = Time.time;
+                        // Show last known result immediately (no stall)
+                        _structureTag.TryGetValue(id, out structureTag);
+                        // Kick off a background refresh if the cache is stale
+                        if (!_structureNext.TryGetValue(id, out float nextTime) || now >= nextTime)
                         {
-                            Plugin.GetStructureFootprint(seeds, out var visited);
-                            structureTag = $"\n    <color=green>↳ {visited.Count} pieces connected — will be consumed</color>";
+                            _structureNext[id] = now + 2f;
+                            // Snapshot all Unity data on the main thread (fast)
+                            var fpPos = __instance.transform.position;
+                            var fpGo = __instance.gameObject;
+                            var allWnt = Physics.OverlapSphere(fpPos, 60f)
+                                .Select(c => c.GetComponentInParent<WearNTear>())
+                                .Where(w => w != null && w.gameObject != fpGo)
+                                .Distinct().ToList();
+                            // Build graph: index → snap point positions, index → piece center
+                            var centers   = allWnt.Select(w => w.transform.position).ToArray();
+                            var snapLists = allWnt.Select(w => {
+                                var snaps = new List<Transform>();
+                                w.GetComponent<Piece>()?.GetSnapPoints(snaps);
+                                return snaps.Select(s => s.position).ToArray();
+                            }).ToArray();
+                            // Seeds = pieces within 2m of fire
+                            var seedIdxs = allWnt
+                                .Select((w, i) => (w, i))
+                                .Where(x => Vector3.Distance(x.w.transform.position, fpPos) <= 2f)
+                                .Select(x => x.i).ToList();
+                            System.Threading.Tasks.Task.Run(() =>
+                            {
+                                const float snapTol = 0.35f;
+                                string tag;
+                                if (seedIdxs.Count == 0)
+                                {
+                                    tag = "\n    <color=red>↳ build a structure around this fire</color>";
+                                }
+                                else
+                                {
+                                    // BFS purely on snapshot data — no Unity API calls
+                                    var visited = new HashSet<int>();
+                                    var queue   = new Queue<int>(seedIdxs);
+                                    foreach (var i in seedIdxs) visited.Add(i);
+                                    while (queue.Count > 0)
+                                    {
+                                        int cur = queue.Dequeue();
+                                        foreach (var sp in snapLists[cur])
+                                        {
+                                            for (int nb = 0; nb < allWnt.Count; nb++)
+                                            {
+                                                if (visited.Contains(nb)) continue;
+                                                bool snapped = false;
+                                                foreach (var nbSp in snapLists[nb])
+                                                    if (Vector3.Distance(nbSp, sp) <= snapTol) { snapped = true; break; }
+                                                if (snapped) { visited.Add(nb); queue.Enqueue(nb); }
+                                            }
+                                        }
+                                    }
+                                    tag = $"\n    <color=green>↳ {visited.Count} pieces connected — will be consumed</color>";
+                                }
+                                // Write result — Dictionary write from bg thread is safe here because
+                                // we only write once per refresh cycle and reads are benign races on a string ref
+                                _structureTag[id] = tag;
+                            });
                         }
                     }
                     __result += $"\n  <color=yellow>{item}</color> — {hoverText}{structureTag}";
@@ -3051,9 +3170,16 @@ namespace EnvReporter
 
             // Check hotbar slot (index is 1-based in Valheim)
             var item = __instance.GetInventory().GetItemAt(index - 1, 0);
-            if (item?.m_dropPrefab == null) return true;
+            if (item == null) return true;
 
-            string prefab = item.m_dropPrefab.name;
+            string prefab = item.m_dropPrefab?.name ?? "";
+            if (string.IsNullOrEmpty(prefab))
+            {
+                var match = ObjectDB.instance?.m_items?.Find(
+                    go => go.GetComponent<ItemDrop>()?.m_itemData?.m_shared?.m_name == item.m_shared?.m_name);
+                prefab = match?.name ?? "";
+            }
+            if (string.IsNullOrEmpty(prefab)) return true;
             var ritualItems = Plugin.Cfg.Rituals.Items;
             bool RitualEnabled(string key) =>
                 ritualItems.TryGetValue(key, out var r) && r.Enabled &&
@@ -3061,7 +3187,7 @@ namespace EnvReporter
             string RitualMsg(string key, string fallback) =>
                 ritualItems.TryGetValue(key, out var r) ? r.Message : fallback;
 
-            bool isRitual = (prefab == Plugin.SeekFood      && RitualEnabled("seek_altar"))
+            bool isRitual = (prefab == Plugin.SeekFood       && RitualEnabled("seek_altar"))
                          || (prefab.StartsWith("Mushroom")  && RitualEnabled("restore_power"))
                          || (prefab == Plugin.HomeFood       && RitualEnabled("seek_bed"))
                          || (prefab == Plugin.FeatherFood    && RitualEnabled("feather_fall"))
@@ -3082,6 +3208,7 @@ namespace EnvReporter
                          || (prefab == Plugin.FireWallFood     && RitualEnabled("fire_wall"))
                          || (prefab == Plugin.CorpseFood       && RitualEnabled("seek_corpse"))
                          || (prefab == Plugin.MistFood         && RitualEnabled("clear_mist"))
+                         || (Plugin.TreeStandSeeds.ContainsKey(prefab) && RitualEnabled("tree_stand"))
                          || Plugin.HuntDefs.Any(d => prefab == Plugin.HuntIngredient(d) && RitualEnabled(d.Key))
                          || (Plugin.LegendaryIngredientMatch(prefab) is string lk && RitualEnabled(lk));
             if (!isRitual) return true;
@@ -3102,7 +3229,7 @@ namespace EnvReporter
             {
                 if (__instance.GetSEMan().HaveStatusEffect(Plugin.GuidingWindSE?.NameHash() ?? 0))
                 { __instance.Message(MessageHud.MessageType.Center, "The wind already guides you."); return false; }
-                Consume(); Plugin.ActivateSeek(message: RitualMsg("seek_altar", "The wind stirs."), mult: ritualMult); return false;
+                Consume(); Plugin.ActivateSeek(message: RitualMsg("seek_altar", "The wind stirs."), mult: ritualMult, ingredient: prefab); return false;
             }
             if (prefab.StartsWith("Mushroom"))
             {
@@ -3201,6 +3328,12 @@ namespace EnvReporter
             if (prefab == Plugin.MistFood && RitualEnabled("clear_mist"))
             {
                 Consume(); Plugin.ActivateClearMist(__instance, fp, RitualMsg("clear_mist", "The wisp answers. Mist retreats."), ritualMult); return false;
+            }
+            if (Plugin.TreeStandSeeds.ContainsKey(prefab) && RitualEnabled("tree_stand"))
+            {
+                if (__instance.m_customData.ContainsKey(Plugin.TreeStandKey))
+                { __instance.Message(MessageHud.MessageType.Center, "The forest already waits in your dreams."); return false; }
+                Consume(); Plugin.ActivateTreeStand(__instance, fp, prefab, RitualMsg("tree_stand", "The seeds remember the earth. Sleep, and the forest will answer.")); return false;
             }
             var huntMatch = System.Array.Find(Plugin.HuntDefs, d => prefab == Plugin.HuntIngredient(d) && RitualEnabled(d.Key));
             if (huntMatch.Key != null)
@@ -3306,6 +3439,63 @@ namespace EnvReporter
             }
             if (meadCount > 0)
                 __instance.Message(MessageHud.MessageType.TopLeft, $"{meadCount} fermenters answered the blessing.");
+        }
+    }
+
+    [HarmonyPatch(typeof(Player), "SetSleeping")]
+    class TreeStandWakePatch
+    {
+        static void Postfix(Player __instance, bool sleep)
+        {
+            // Fire on wake (sleep=false), only for local player
+            if (sleep || __instance != Player.m_localPlayer) return;
+            if (!__instance.m_customData.TryGetValue(Plugin.TreeStandKey, out var encoded)) return;
+            __instance.m_customData.Remove(Plugin.TreeStandKey);
+
+            var scene = ZNetScene.instance;
+            if (scene == null) return;
+
+            // Format: "seedPrefab;x,y,z|x,y,z|..."
+            var parts    = encoded.Split(';');
+            string seed  = parts.Length > 0 ? parts[0] : "FirCone";
+            string posData = parts.Length > 1 ? parts[1] : encoded;
+            if (!Plugin.TreeStandSeeds.TryGetValue(seed, out string treeName))
+                treeName = "FirTree";
+            var treePrefab = scene.GetPrefab(treeName);
+            if (treePrefab == null) { Plugin.Log.LogWarning($"[Pilgrim] Tree prefab '{treeName}' not found"); return; }
+
+            var positions = posData.Split('|')
+                .Select(s => s.Split(','))
+                .Where(p => p.Length == 3)
+                .Select(p => new Vector3(float.Parse(p[0]), float.Parse(p[1]), float.Parse(p[2])))
+                .ToList();
+
+            int count = 0;
+            foreach (var pos in positions)
+            {
+                var spawnPos = Plugin.ProjectToTerrain(pos);
+                var rot      = UnityEngine.Quaternion.Euler(0f, UnityEngine.Random.Range(0f, 360f), 0f);
+                float scale  = UnityEngine.Random.Range(0.95f, 1.05f);
+                // Instantiate via ZNetScene so the tree is networked and persists
+                var go = Object.Instantiate(treePrefab, spawnPos, rot);
+                var nview = go.GetComponent<ZNetView>();
+                if (nview != null && nview.IsValid())
+                    nview.GetZDO().Set(ZDOVars.s_scaleHash, scale);
+                go.transform.localScale = Vector3.one * scale;
+                count++;
+            }
+            string treeFriendly = seed switch
+            {
+                "FirCone"    => "fir trees",
+                "PineCone"   => "pine trees",
+                "Acorn"      => "oaks",
+                "BeechSeeds" => "beech trees",
+                "BirchSeeds" => "birch trees",
+                _            => "trees",
+            };
+            if (count > 0)
+                __instance.Message(MessageHud.MessageType.TopLeft, $"A stand of {count} {treeFriendly} has taken root.");
+            Plugin.Log.LogInfo($"[Pilgrim] Tree stand: spawned {count} {treeName}");
         }
     }
 
@@ -4135,11 +4325,12 @@ namespace EnvReporter
     [HarmonyPatch(typeof(Container), "Awake")]
     static class ShipStoragePatch
     {
-        // karve: 6×6 (tier-3 cart), vikingship: 6×6 (doubles default 6×3)
+        // karve: 6×6 (tier-3 cart), vikingship/vikingship_ashlands: 6×6 (doubles default 6×3)
         internal static readonly Dictionary<string, int> ShipLevels = new()
         {
-            { "karve",      3 },
-            { "vikingship", 3 },
+            { "karve",               3 },
+            { "vikingship",          3 },
+            { "vikingship_ashlands", 3 },
         };
 
         static void Postfix(Container __instance)
@@ -4173,6 +4364,67 @@ namespace EnvReporter
             var bytes = nview.GetZDO()?.GetByteArray("items");
             if (bytes != null && bytes.Length > 0)
                 inv.Load(new ZPackage(bytes));
+        }
+    }
+
+    // ── Ship: last-driven minimap pin ───────────────────────────────────────
+
+    [HarmonyPatch(typeof(Ship), "CustomFixedUpdate")]
+    static class ShipPinPatch
+    {
+        static Minimap.PinData? _shipPin;
+        static float _updateTimer;
+        static System.Reflection.MethodInfo? _addPinMethod;
+
+        static void Postfix(Ship __instance)
+        {
+            if (!Plugin.Cfg.Ships.Enabled) return;
+            var player = Player.m_localPlayer;
+            if (player == null) return;
+            if (!__instance.IsPlayerInBoat(player)) return;
+
+            _updateTimer -= Time.fixedDeltaTime;
+            if (_updateTimer > 0f) return;
+            _updateTimer = 2f;
+
+            if (Minimap.instance == null) return;
+            var pos = __instance.transform.position;
+            string shipName = __instance.gameObject.name.ToLower().Replace("(clone)", "").Trim();
+            string label = shipName switch
+            {
+                "karve"               => "Karve",
+                "vikingship"          => "Longship",
+                "vikingship_ashlands" => "Ashlands Longship",
+                _                    => "Ship",
+            };
+
+            if (_shipPin != null)
+            {
+                _shipPin.m_pos  = pos;
+                _shipPin.m_name = label;
+                return;
+            }
+
+            // Remove stale saved pin from prior session
+            var pinsField = typeof(Minimap).GetField("m_pins", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (pinsField?.GetValue(Minimap.instance) is List<Minimap.PinData> pins)
+            {
+                foreach (var stale in pins.FindAll(p => p.m_name is "Karve" or "Longship" or "Ashlands Longship" or "Ship" && p.m_save))
+                    Minimap.instance.RemovePin(stale);
+            }
+
+            _addPinMethod ??= typeof(Minimap).GetMethod("AddPin", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (_addPinMethod == null) return;
+            var paramDefs = _addPinMethod.GetParameters();
+            var args = new object[paramDefs.Length];
+            args[0] = pos;
+            args[1] = (Minimap.PinType)0;
+            args[2] = label;
+            args[3] = true;
+            args[4] = false;
+            for (int i = 5; i < args.Length; i++)
+                args[i] = paramDefs[i].DefaultValue ?? System.Activator.CreateInstance(paramDefs[i].ParameterType);
+            _shipPin = _addPinMethod.Invoke(Minimap.instance, args) as Minimap.PinData;
         }
     }
 
@@ -4344,6 +4596,16 @@ namespace EnvReporter
             if (player == null || player != Player.m_localPlayer) return;
             if (!Plugin.Cfg.Rituals.Enabled) return;
             string prefab = item.m_dropPrefab?.name ?? "";
+            if (string.IsNullOrEmpty(prefab))
+            {
+                var match = ObjectDB.instance?.m_items?.Find(
+                    go => go.GetComponent<ItemDrop>()?.m_itemData?.m_shared?.m_name == item.m_shared?.m_name);
+                prefab = match?.name ?? "";
+                if (!string.IsNullOrEmpty(prefab))
+                    Plugin.Log.LogInfo($"[Pilgrim] RitualDiscovery: resolved '{prefab}' via ObjectDB (m_dropPrefab was null)");
+                else
+                    Plugin.Log.LogWarning($"[Pilgrim] RitualDiscovery: m_dropPrefab null and ObjectDB lookup failed for '{item.m_shared?.m_name}'");
+            }
             if (string.IsNullOrEmpty(prefab)) return;
 
             // Auto-grant Eikthyr power on first trophy pickup — no item stand available yet in early game
@@ -4421,6 +4683,12 @@ namespace EnvReporter
             foreach (var invItem in inv.GetAllItems())
             {
                 string prefab = invItem.m_dropPrefab?.name ?? "";
+                if (string.IsNullOrEmpty(prefab))
+                {
+                    var go = ObjectDB.instance?.m_items?.Find(
+                        g => g.GetComponent<ItemDrop>()?.m_itemData?.m_shared?.m_name == invItem.m_shared?.m_name);
+                    prefab = go?.name ?? "";
+                }
                 if (string.IsNullOrEmpty(prefab)) continue;
                 foreach (var (match, isPrefix, key, _) in Plugin.RitualItemMap)
                 {
@@ -4542,12 +4810,21 @@ namespace EnvReporter
 
     static class ItemUtil
     {
+        // m_dropPrefab can be null for some items (e.g. certain creature drops); fall back to ObjectDB lookup
+        static string PrefabName(ItemDrop.ItemData item)
+        {
+            if (item.m_dropPrefab != null) return item.m_dropPrefab.name;
+            var go = ObjectDB.instance?.m_items?.Find(
+                g => g.GetComponent<ItemDrop>()?.m_itemData?.m_shared?.m_name == item.m_shared?.m_name);
+            return go?.name ?? "";
+        }
+
         public static int CountByPrefab(Inventory inv, string prefab) =>
-            inv.GetAllItems().Where(i => i.m_dropPrefab?.name == prefab).Sum(i => i.m_stack);
+            inv.GetAllItems().Where(i => PrefabName(i) == prefab).Sum(i => i.m_stack);
 
         public static void RemoveByPrefab(Inventory inv, string prefab, int amount)
         {
-            foreach (var item in inv.GetAllItems().Where(i => i.m_dropPrefab?.name == prefab).ToList())
+            foreach (var item in inv.GetAllItems().Where(i => PrefabName(i) == prefab).ToList())
             {
                 int take = Mathf.Min(amount, item.m_stack);
                 item.m_stack -= take;
@@ -5247,7 +5524,7 @@ namespace EnvReporter
                 },
                 Items    = new Dictionary<string, RitualItemConfig>
                 {
-                    ["seek_altar"]    = new RitualItemConfig { Enabled = true, Item = "RawMeat",       HoverText = "Seek the next altar",       Message = "The wind stirs — {boss} awaits.",                                    Domain = "Navigation" },
+                    ["seek_altar"]    = new RitualItemConfig { Enabled = true, Item = "BjornMeat",    HoverText = "Seek the next altar",       Message = "The wind stirs — {boss} awaits.",                                    Domain = "Navigation" },
                     ["seek_bed"]      = new RitualItemConfig { Enabled = true, Item = "Dandelion",     HoverText = "Seek your bed",              Message = "The flower carries you home...",                                            Domain = "Navigation" },
                     ["seek_trader"]   = new RitualItemConfig { Enabled = true, Item = "Coins",         HoverText = "Seek a merchant",            Message = "Gold calls to gold...",                                                     Domain = "Navigation" },
                     ["seek_dungeon"]  = new RitualItemConfig { Enabled = true, Item = "Trophy*",       HoverText = "Seek the nearest dungeon",   Message = "The veil parts — something stirs nearby.",                                 Domain = "Navigation" },
@@ -5262,15 +5539,16 @@ namespace EnvReporter
                     ["kindle"]        = new RitualItemConfig { Enabled = true, Item = "Resin",         HoverText = "Kindle nearby fires",        Message = "The darkness yields.",                                                     Domain = "Blessings" },
                     ["repair"]        = new RitualItemConfig { Enabled = true, Item = "Coal",          HoverText = "Mend your works",            Message = "The fire remembers. Your works are mended.",                               Domain = "Blessings" },
                     ["giant"]         = new RitualItemConfig { Enabled = true, Item = "YmirRemains",   HoverText = "Become the mountain",        Message = "The mountain answers. You are vast.", Duration = 60f,                     Domain = "Blessings" },
-                    ["ward_bubble"]   = new RitualItemConfig { Enabled = true, Item = "Ruby",          HoverText = "Carry the shield",          Message = "A ward rises. None shall pass.", Duration = 300f,                         Domain = "Blessings" },
+                    ["ward_bubble"]   = new RitualItemConfig { Enabled = true, Item = "Amber",         HoverText = "Carry the shield",          Message = "A ward rises. None shall pass.", Duration = 300f,                         Domain = "Blessings" },
                     ["campfire_ward"] = new RitualItemConfig { Enabled = true, Item = "AmberPearl",    HoverText = "Raise a sanctuary",          Message = "A sanctuary rises. None shall enter.", Duration = 60f,                    Domain = "Blessings" },
                     ["clear_mist"]    = new RitualItemConfig { Enabled = true, Item = "Wisp",        HoverText = "Push the mist away",         Message = "The wisp answers. Mist retreats.", Duration = 120f,                        Domain = "Blessings" },
                     ["seek_corpse"]   = new RitualItemConfig { Enabled = true, Item = "Chitin",      HoverText = "Seek your corpse",           Message = "The bones remember. Return to what was lost.",                             Domain = "Navigation" },
                     ["tar_moat"]      = new RitualItemConfig { Enabled = false, Item = "Obsidian",     HoverText = "Raise a tar moat",           Message = "The earth bleeds black. None shall cross.",        Duration = 60f,       Domain = "Blessings" },
-                    ["fire_wall"]     = new RitualItemConfig { Enabled = true, Item = "FlametalNew",   HoverText = "Ignite the structure",        Message = "The structure burns. None shall pass.",             Duration = 60f,       Domain = "Blessings" },
+                    ["fire_wall"]     = new RitualItemConfig { Enabled = true, Item = "Ruby",          HoverText = "Ignite the structure",        Message = "The structure burns. None shall pass.",             Duration = 60f,       Domain = "Blessings" },
+                    ["tree_stand"]    = new RitualItemConfig { Enabled = true, Item = "FirCone",       HoverText = "Raise a stand of trees",      Message = "The seeds remember the earth. Sleep, and the forest will answer.",         Domain = "Blessings" },
                     ["seek_deer"]        = new RitualItemConfig { Enabled = true, Item = "DeerHide",      HoverText = "Hunt the deer",        Message = "He thinks he's alone.",                    Distance = 100f, Domain = "Navigation" },
                     ["seek_boar"]        = new RitualItemConfig { Enabled = true, Item = "LeatherScraps", HoverText = "Hunt the boar",        Message = "The boar roots nearby.",                   Distance = 100f, Domain = "Navigation" },
-                    ["seek_bear"]        = new RitualItemConfig { Enabled = true, Item = "BJornHide",    HoverText = "Hunt the bear",        Message = "A great shadow waits in the trees.",        Distance = 100f, Domain = "Navigation" },
+                    ["seek_bear"]        = new RitualItemConfig { Enabled = true, Item = "BjornHide",    HoverText = "Hunt the bear",        Message = "A great shadow waits in the trees.",        Distance = 100f, Domain = "Navigation" },
                     ["seek_troll"]       = new RitualItemConfig { Enabled = true, Item = "TrollHide",     HoverText = "Hunt the troll",       Message = "The earth shudders.",                       Distance = 100f, Domain = "Navigation" },
                     ["seek_abomination"] = new RitualItemConfig { Enabled = true, Item = "Root",          HoverText = "Hunt the abomination", Message = "Something ancient stirs in the roots.",    Distance = 100f, Domain = "Navigation" },
                     ["seek_wolf"]        = new RitualItemConfig { Enabled = true, Item = "WolfPelt",      HoverText = "Hunt the wolf",        Message = "The pack circles.",                         Distance = 100f, Domain = "Navigation" },
