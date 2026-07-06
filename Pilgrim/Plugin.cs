@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.4.0")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.4.1")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -154,6 +154,33 @@ namespace EnvReporter
         internal static string CrateMetalSeenKey(string prefab) => $"pilgrim_metal_{prefab.ToLower()}";
         internal static bool   IsCrateMetalSeen(Player p, string prefab) =>
             p.m_customData.ContainsKey(CrateMetalSeenKey(prefab));
+
+        internal static ItemDrop.ItemData? FindCacheItem(Player player) =>
+            player?.GetInventory().GetAllItems().FirstOrDefault(i => i.m_shared.m_name == "Pilgrim's Cache");
+
+        // Returns the live cache inventory (UI open) or a freshly-deserialized temp one (UI closed).
+        internal static Inventory? GetCrateInvForRead(Player player)
+        {
+            if (_crateInventory != null) return _crateInventory;
+            var cacheItem = FindCacheItem(player);
+            if (cacheItem == null) return null;
+            var inv = new Inventory("tmp", null, 6, cacheItem.m_quality * 2);
+            cacheItem.m_customData.TryGetValue(CrateDataKey, out var b64);
+            DeserializeCrate(inv, b64);
+            return inv;
+        }
+
+        // Serialize a temp inventory back to the cache item's customData (no-op when UI is open).
+        internal static void SaveCrateInvIfClosed(Player player, Inventory inv)
+        {
+            if (_crateInventory != null) return; // live inventory — SaveAndCloseCrateUI handles it
+            var cacheItem = FindCacheItem(player);
+            if (cacheItem == null) return;
+            cacheItem.m_customData[CrateDataKey] = SerializeCrate(inv);
+            float w = inv.GetAllItems().Sum(i => i.m_stack * i.m_shared.m_weight);
+            cacheItem.m_customData["pilgrim_crate_weight"] =
+                w.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
 
         internal static string SerializeCrate(Inventory inv)
         {
@@ -4891,9 +4918,8 @@ namespace EnvReporter
                 Plugin.LearnRitual(player, key, display);
             }
 
-            // Track material discovery for Pilgrim's Cache
-            if (item.m_shared.m_itemType == ItemDrop.ItemData.ItemType.Material)
-                player.m_customData[Plugin.CrateMetalSeenKey(prefab)] = "1";
+            // Track item discovery for Pilgrim's Cache
+            player.m_customData[Plugin.CrateMetalSeenKey(prefab)] = "1";
         }
     }
 
@@ -4969,9 +4995,8 @@ namespace EnvReporter
                         __instance.m_customData[$"ath_known_{key}"] = "1"; // silent — no toast
                 }
 
-                // Backfill material discovery for Pilgrim's Cache
-                if (invItem.m_shared.m_itemType == ItemDrop.ItemData.ItemType.Material)
-                    __instance.m_customData[Plugin.CrateMetalSeenKey(prefab)] = "1";
+                // Backfill item discovery for Pilgrim's Cache
+                __instance.m_customData[Plugin.CrateMetalSeenKey(prefab)] = "1";
             }
         }
     }
@@ -5926,6 +5951,47 @@ namespace EnvReporter
         }
     }
 
+    // ── Cache contents count as player inventory for crafting ────────────────────
+
+    [HarmonyPatch(typeof(Inventory), nameof(Inventory.CountItems))]
+    static class CrateCountForCraftingPatch
+    {
+        static void Postfix(Inventory __instance, string name, ref int __result)
+        {
+            var player = Player.m_localPlayer;
+            if (player == null || __instance != player.GetInventory()) return;
+            var crateInv = Plugin.GetCrateInvForRead(player);
+            if (crateInv != null) __result += crateInv.CountItems(name);
+        }
+    }
+
+    [HarmonyPatch(typeof(Inventory), nameof(Inventory.RemoveItem),
+        new System.Type[] { typeof(string), typeof(int), typeof(int), typeof(bool) })]
+    static class CrateRemoveForCraftingPatch
+    {
+        static int _hadBefore;
+
+        static void Prefix(Inventory __instance, string name)
+        {
+            _hadBefore = 0;
+            var player = Player.m_localPlayer;
+            if (player == null || __instance != player.GetInventory()) return;
+            _hadBefore = __instance.CountItems(name); // player-only count before removal
+        }
+
+        static void Postfix(Inventory __instance, string name, int amount)
+        {
+            var player = Player.m_localPlayer;
+            if (player == null || __instance != player.GetInventory()) return;
+            int fromCache = amount - System.Math.Min(_hadBefore, amount);
+            if (fromCache <= 0) return;
+            var crateInv = Plugin.GetCrateInvForRead(player);
+            if (crateInv == null) return;
+            crateInv.RemoveItem(name, fromCache);
+            Plugin.SaveCrateInvIfClosed(player, crateInv);
+        }
+    }
+
     // ── Block crafting a second cache + per-quality upgrade requirements ─────────
 
     [HarmonyPatch(typeof(Player), nameof(Player.HaveRequirements),
@@ -6118,12 +6184,6 @@ namespace EnvReporter
 
         if (item.m_shared.m_name == "Pilgrim's Cache") return false;
 
-        if (item.m_shared.m_itemType != ItemDrop.ItemData.ItemType.Material)
-        {
-            player?.Message(MessageHud.MessageType.Center, "The cache holds materials only.");
-            return false;
-        }
-
         if (player != null && !Plugin.IsCrateMetalSeen(player, prefab))
         {
             player.Message(MessageHud.MessageType.Center, "You haven't carried this before.");
@@ -6180,12 +6240,6 @@ namespace EnvReporter
             var player = Player.m_localPlayer;
             string prefab = ItemUtil.PrefabName(item);
 
-            if (item.m_shared.m_itemType != ItemDrop.ItemData.ItemType.Material)
-            {
-                player?.Message(MessageHud.MessageType.Center, "The cache holds materials only.");
-                __result = false;
-                return false;
-            }
             if (player != null && !Plugin.IsCrateMetalSeen(player, prefab))
             {
                 player.Message(MessageHud.MessageType.Center, "You haven't carried this before.");
