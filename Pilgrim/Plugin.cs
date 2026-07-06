@@ -6116,6 +6116,8 @@ namespace EnvReporter
         var player = Player.m_localPlayer;
         string prefab = ItemUtil.PrefabName(item);
 
+        if (item.m_shared.m_name == "Pilgrim's Cache") return false;
+
         if (item.m_shared.m_itemType != ItemDrop.ItemData.ItemType.Material)
         {
             player?.Message(MessageHud.MessageType.Center, "The cache holds materials only.");
@@ -6173,6 +6175,7 @@ namespace EnvReporter
         static bool Prefix(Inventory __instance, ItemDrop.ItemData item, ref bool __result)
         {
             if (__instance != Plugin._crateInventory) return true;
+            if (!CrateFilter.Allow(__instance, item)) { __result = false; return false; }
 
             var player = Player.m_localPlayer;
             string prefab = ItemUtil.PrefabName(item);
