@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.3.7")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.4.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -122,6 +122,272 @@ namespace EnvReporter
         internal static Vector3? SeekOverrideTarget = null;
         // Cached boss altar position from server RPC — used by SE_GuidingWind wind refresh
         internal static Vector3? BossSeekTarget = null;
+
+        // ── Pilgrim's Cache (portable metal crate) ──────────────────────────────
+        internal const string CratePrefabName = "PilgrimCrate";
+        internal const string CrateDataKey    = "pilgrim_crate";
+        internal static readonly string[] CrateMetals =
+            { "Copper", "Tin", "Bronze", "Iron", "Silver", "BlackMetal", "Flametal", "Coins" }; // legacy — filter now uses ItemType.Material
+        internal static GameObject?        _cratePrefabGo;
+        internal static bool               _suppressZNetViewAwake  = false;
+        internal static bool               _suppressContainerAwake = false;
+        internal static ItemDrop.ItemData? _crateItem;
+        internal static Inventory?        _crateInventory;
+        internal static Container?        _fakeCrateContainer;
+        internal static GameObject?       _fakeCrateGo;
+        internal static bool              _closingCrateUI = false;
+        internal static bool              _crateUIOpen    = false;
+        internal static Recipe?                _crateRecipe         = null;
+        internal static Piece.Requirement[]?  _crateCraftResources = null;
+
+        // Index = target quality (2–5). Craft (Q1) handled by recipe ingredients directly.
+        internal static readonly (string prefab, int amount)[] CrateUpgrades =
+        {
+            ("",           0), // [0] unused
+            ("",           0), // [1] Q1 craft — handled by recipe
+            ("Bronze",     5), // [2] Q1→Q2  factor=1 → amountPerLevel=5
+            ("Iron",       4), // [3] Q2→Q3  factor=2 → amountPerLevel=2
+            ("Silver",     6), // [4] Q3→Q4  factor=3 → amountPerLevel=2
+            ("BlackMetal", 8), // [5] Q4→Q5  factor=4 → amountPerLevel=2
+        };
+
+        internal static string CrateMetalSeenKey(string prefab) => $"pilgrim_metal_{prefab.ToLower()}";
+        internal static bool   IsCrateMetalSeen(Player p, string prefab) =>
+            p.m_customData.ContainsKey(CrateMetalSeenKey(prefab));
+
+        internal static string SerializeCrate(Inventory inv)
+        {
+            var pkg   = new ZPackage();
+            var items = inv.GetAllItems();
+            pkg.Write(items.Count);
+            foreach (var it in items)
+            {
+                pkg.Write(ItemUtil.PrefabName(it));
+                pkg.Write(it.m_stack);
+                pkg.Write(it.m_quality);
+            }
+            return System.Convert.ToBase64String(pkg.GetArray());
+        }
+
+        internal static void DeserializeCrate(Inventory inv, string? b64)
+        {
+            if (string.IsNullOrEmpty(b64)) return;
+            try
+            {
+                var pkg   = new ZPackage(System.Convert.FromBase64String(b64));
+                int count = pkg.ReadInt();
+                for (int i = 0; i < count; i++)
+                {
+                    string name  = pkg.ReadString();
+                    int    stack = pkg.ReadInt();
+                    int    qual  = pkg.ReadInt();
+                    if (!string.IsNullOrEmpty(name) && stack > 0)
+                        inv.AddItem(name, stack, qual, 0, 0L, "");
+                }
+            }
+            catch (System.Exception ex) { Log.LogWarning($"[Pilgrim] Crate deserialize failed: {ex.Message}"); }
+        }
+
+        internal static void RegisterCrateItem(ObjectDB db)
+        {
+            // Guard against double-registration using m_items directly (hash lookup unreliable mid-init)
+            if (db.m_items.Any(g => g != null && g.name == CratePrefabName)) return;
+            var template = db.GetItemPrefab("Coins");
+            if (template == null) { Log.LogWarning("[Pilgrim] Crate: Coins template not found"); return; }
+
+            // Suppress ZNetView.Awake so the prefab clone never registers as a live instance.
+            // Without this, ZNetScene.OnDestroy would Destroy our go via m_instances cleanup.
+            _suppressZNetViewAwake = true;
+            var go = Object.Instantiate(template);
+            _suppressZNetViewAwake = false;
+            go.name = CratePrefabName;
+            Object.DontDestroyOnLoad(go);
+            _cratePrefabGo = go;
+
+            var drop = go.GetComponent<ItemDrop>();
+            drop.m_itemData.m_shared.m_name         = "Pilgrim's Cache";
+            drop.m_itemData.m_shared.m_description  = "Holds a little bit of everything. Right-click to open.";
+            drop.m_itemData.m_shared.m_weight       = 5f;
+            drop.m_itemData.m_shared.m_maxStackSize = 1;
+            drop.m_itemData.m_shared.m_value        = 0;
+            drop.m_itemData.m_shared.m_itemType     = ItemDrop.ItemData.ItemType.Material;
+            drop.m_itemData.m_shared.m_maxQuality   = 5;
+            drop.m_itemData.m_dropPrefab            = go;
+            drop.m_autoPickup                       = false;
+
+            db.m_items.Add(go);
+
+            // Update private hash dictionaries directly (no public method for this)
+            var rf = BindingFlags.Instance | BindingFlags.NonPublic;
+            if (typeof(ObjectDB).GetField("m_itemByHash", rf)?.GetValue(db) is Dictionary<int, GameObject> byHash)
+                byHash[go.name.GetStableHashCode()] = go;
+            if (typeof(ObjectDB).GetField("m_itemByData", rf)?.GetValue(db)
+                    is Dictionary<ItemDrop.ItemData.SharedData, GameObject> byData)
+                byData[drop.m_itemData.m_shared] = go;
+
+            AddCrateToZNetScene(go);
+            Log.LogInfo("[Pilgrim] Registered PilgrimCrate");
+        }
+
+        internal static void RegisterCrateRecipe(ObjectDB db, ZNetScene zns)
+        {
+            if (db == null || zns == null) { Log.LogWarning($"[Pilgrim] Recipe: db={db != null} zns={zns != null}"); return; }
+            if (!(Cfg?.Cache?.Enabled ?? true)) { Log.LogInfo("[Pilgrim] Recipe: Cache disabled"); return; }
+            if (db.m_recipes.Any(r => r != null && r.name == "Recipe_PilgrimCrate")) { Log.LogInfo("[Pilgrim] Recipe: already registered"); return; }
+
+            var crateItem = _cratePrefabGo?.GetComponent<ItemDrop>();
+            if (crateItem == null) { Log.LogWarning("[Pilgrim] Recipe: _cratePrefabGo null"); return; }
+
+            ItemDrop Res(string name) {
+                var r = db.GetItemPrefab(name)?.GetComponent<ItemDrop>();
+                if (r == null) Log.LogWarning($"[Pilgrim] Recipe: ingredient '{name}' not found");
+                return r;
+            }
+
+            var station = zns.GetPrefab("forge")?.GetComponent<CraftingStation>();
+            Log.LogInfo($"[Pilgrim] Recipe: forge station={station != null}");
+
+            var recipe = ScriptableObject.CreateInstance<Recipe>();
+            recipe.name              = "Recipe_PilgrimCrate";
+            recipe.m_item            = crateItem;
+            recipe.m_amount          = 1;
+            recipe.m_minStationLevel = 1;
+            recipe.m_craftingStation = station;
+            // Craft (Q1) cost only — upgrades use different metals handled via patches
+            recipe.m_resources = new Piece.Requirement[]
+            {
+                new Piece.Requirement { m_resItem = Res("Copper"),       m_amount = 10, m_amountPerLevel = 0 },
+                new Piece.Requirement { m_resItem = Res("LeatherScraps"), m_amount = 6, m_amountPerLevel = 0 },
+            };
+
+            _crateRecipe         = recipe;
+            _crateCraftResources = recipe.m_resources;
+            db.m_recipes.Add(recipe);
+            Log.LogInfo("[Pilgrim] Registered Recipe_PilgrimCrate");
+        }
+
+        internal static void AddCrateToZNetScene(GameObject go)
+        {
+            var zns = ZNetScene.instance;
+            if (zns == null) return;
+            var rf = BindingFlags.Instance | BindingFlags.NonPublic;
+            if (typeof(ZNetScene).GetField("m_namedPrefabs", rf)?.GetValue(zns) is Dictionary<int, GameObject> named)
+                named[go.name.GetStableHashCode()] = go;
+            if (!zns.m_prefabs.Contains(go))
+                zns.m_prefabs.Add(go);
+            SetupCrateVisuals(zns, go);
+        }
+
+        internal static void SetupCrateVisuals(ZNetScene zns, GameObject go)
+        {
+            var source = zns.GetPrefab("piece_chest_barrel");
+            if (source == null) { Log.LogWarning("[Pilgrim] piece_chest_barrel prefab not found"); return; }
+
+            var drop        = go.GetComponent<ItemDrop>();
+            var srcFilter   = source.GetComponentInChildren<MeshFilter>();
+            var dstFilter   = go.GetComponentInChildren<MeshFilter>();
+            var dstRenderer = go.GetComponentInChildren<MeshRenderer>();
+            var srcRenderer = source.GetComponentInChildren<MeshRenderer>();
+
+            Sprite icon = source.GetComponent<Piece>()?.m_icon;
+            if (icon != null)
+                drop.m_itemData.m_shared.m_icons = new Sprite[] { icon };
+
+            if (srcFilter != null && dstFilter != null)
+                dstFilter.sharedMesh = srcFilter.sharedMesh;
+            if (srcRenderer != null && dstRenderer != null)
+                dstRenderer.sharedMaterials = srcRenderer.sharedMaterials;
+
+            if (dstRenderer != null)
+                dstRenderer.transform.localScale = Vector3.one * 0.5f;
+
+            // Replace Coins collider with one that matches barrel shape
+            foreach (var col in go.GetComponentsInChildren<Collider>())
+                Object.Destroy(col);
+            var cap = go.AddComponent<CapsuleCollider>();
+            cap.radius = 0.22f;
+            cap.height = 0.42f;
+            cap.center = new Vector3(0f, 0.21f, 0f);
+
+            // Keep the barrel upright when dropped — freeze X/Z rotation, add drag
+            var rb = go.GetComponent<Rigidbody>();
+            if (rb != null)
+            {
+                rb.constraints = RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationZ;
+                rb.angularDamping = 10f;
+                rb.mass = 5f;
+            }
+        }
+
+
+        internal static void OpenCrateUI(Player player, ItemDrop.ItemData item)
+        {
+            var gui = InventoryGui.instance;
+            if (gui == null) return;
+
+            // 2 rows per quality level, 6 wide: Q1=12, Q2=24, Q3=36, Q4=48, Q5=60
+            int cols = 6;
+            int rows = item.m_quality * 2;
+            var inv = new Inventory("Pilgrim's Cache", null, cols, rows);
+            item.m_customData.TryGetValue(CrateDataKey, out var b64);
+            DeserializeCrate(inv, b64);
+
+            // Create a local-only Container (no ZNetView) — Awake suppressed via flag
+            if (_fakeCrateGo != null) Object.Destroy(_fakeCrateGo);
+            _fakeCrateGo = new GameObject("PilgrimCrateContainer");
+            _fakeCrateGo.AddComponent<PilgrimCrateMarker>();
+            _fakeCrateGo.transform.position = player.transform.position;
+            Object.DontDestroyOnLoad(_fakeCrateGo);
+            _suppressContainerAwake = true;
+            _fakeCrateContainer = _fakeCrateGo.AddComponent<Container>();
+            _suppressContainerAwake = false;
+
+            // Awake was suppressed, so set m_inventory manually
+            typeof(Container)
+                .GetField("m_inventory", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?.SetValue(_fakeCrateContainer, inv);
+
+            _crateItem      = item;
+            _crateInventory = inv;
+            _crateUIOpen    = true;
+
+            // Keep pilgrim_crate_weight current as items move in/out so GetTotalWeight stays accurate
+            inv.m_onChanged += () =>
+            {
+                if (_crateItem == null || _crateInventory == null) return;
+                float w = _crateInventory.GetAllItems().Sum(i => i.m_stack * i.m_shared.m_weight);
+                _crateItem.m_customData["pilgrim_crate_weight"] =
+                    w.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            };
+
+            gui.Show(_fakeCrateContainer);
+        }
+
+        internal static void SaveAndCloseCrateUI()
+        {
+            if (_closingCrateUI) return;
+            _closingCrateUI = true;
+            if (_crateItem != null && _crateInventory != null)
+            {
+                _crateItem.m_customData[CrateDataKey] = SerializeCrate(_crateInventory);
+                float w = _crateInventory.GetAllItems().Sum(i => i.m_stack * i.m_shared.m_weight);
+                _crateItem.m_customData["pilgrim_crate_weight"] =
+                    w.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+            _crateItem      = null;
+            _crateInventory = null;
+            // Keep _fakeCrateContainer set until after Hide() so SetInUse/IsOwner patches
+            // still recognise the container during Hide's cleanup calls.
+            var gui = InventoryGui.instance;
+            if (gui != null)
+                typeof(InventoryGui)
+                    .GetMethod("CloseContainer", BindingFlags.Instance | BindingFlags.NonPublic)
+                    ?.Invoke(gui, null);
+            _crateUIOpen        = false;
+            _fakeCrateContainer = null;
+            if (_fakeCrateGo != null) { Object.Destroy(_fakeCrateGo); _fakeCrateGo = null; }
+            _closingCrateUI = false;
+        }
 
         // ── Ritual discovery ────────────────────────────────────────────────────
         internal static bool IsRitualKnown(Player player, string key) =>
@@ -4624,6 +4890,10 @@ namespace EnvReporter
                 if (Plugin.IsRitualKnown(player, key)) continue;
                 Plugin.LearnRitual(player, key, display);
             }
+
+            // Track material discovery for Pilgrim's Cache
+            if (item.m_shared.m_itemType == ItemDrop.ItemData.ItemType.Material)
+                player.m_customData[Plugin.CrateMetalSeenKey(prefab)] = "1";
         }
     }
 
@@ -4698,6 +4968,10 @@ namespace EnvReporter
                     if (matches)
                         __instance.m_customData[$"ath_known_{key}"] = "1"; // silent — no toast
                 }
+
+                // Backfill material discovery for Pilgrim's Cache
+                if (invItem.m_shared.m_itemType == ItemDrop.ItemData.ItemType.Material)
+                    __instance.m_customData[Plugin.CrateMetalSeenKey(prefab)] = "1";
             }
         }
     }
@@ -4811,7 +5085,7 @@ namespace EnvReporter
     static class ItemUtil
     {
         // m_dropPrefab can be null for some items (e.g. certain creature drops); fall back to ObjectDB lookup
-        static string PrefabName(ItemDrop.ItemData item)
+        internal static string PrefabName(ItemDrop.ItemData item)
         {
             if (item.m_dropPrefab != null) return item.m_dropPrefab.name;
             var go = ObjectDB.instance?.m_items?.Find(
@@ -5495,11 +5769,475 @@ namespace EnvReporter
 
     }
 
+    // ── Pilgrim's Cache marker (identifies our local-only fake Container) ────
+
+    class PilgrimCrateMarker : MonoBehaviour {}
+
+    // ── Register PilgrimCrate in ObjectDB + ZNetScene ────────────────────────
+
+    [HarmonyPatch(typeof(ObjectDB), "Awake")]
+    static class CrateRegisterPatch
+    {
+        static void Postfix(ObjectDB __instance)
+        {
+            Plugin.RegisterCrateItem(__instance);
+            Plugin.RegisterCrateRecipe(__instance, ZNetScene.instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(ObjectDB), "CopyOtherDB")]
+    static class CrateCopyDbPatch
+    {
+        static void Postfix(ObjectDB __instance)
+        {
+            Plugin.RegisterCrateItem(__instance);
+            Plugin.RegisterCrateRecipe(__instance, ZNetScene.instance);
+        }
+    }
+
+    // Prevent the crate prefab clone from registering as a live ZNetScene instance.
+    // Without this, ZNetScene.OnDestroy would Destroy our prefab go via m_instances cleanup.
+    [HarmonyPatch(typeof(ZNetView), "Awake")]
+    static class CratePrefabZNetViewPatch
+    {
+        static bool Prefix() => !Plugin._suppressZNetViewAwake;
+    }
+
+    // Re-inject into m_namedPrefabs each time ZNetScene rebuilds (scene transitions)
+    [HarmonyPatch(typeof(ZNetScene), "Awake")]
+    static class CrateZNetScenePatch
+    {
+        static void Postfix(ZNetScene __instance)
+        {
+            if (Plugin._cratePrefabGo != null)
+                Plugin.AddCrateToZNetScene(Plugin._cratePrefabGo);
+            Plugin.RegisterCrateRecipe(ObjectDB.instance, __instance);
+        }
+    }
+
+    // ── Make fake Container (no ZNetView) safe ────────────────────────────────
+
+    [HarmonyPatch(typeof(Container), "Awake")]
+    static class FakeContainerAwakePatch
+    {
+        static bool Prefix() => !Plugin._suppressContainerAwake;
+    }
+
+    [HarmonyPatch(typeof(Container), "Save")]
+    static class FakeContainerSavePatch
+    {
+        static bool Prefix(Container __instance) =>
+            !(Plugin._crateUIOpen && __instance == Plugin._fakeCrateContainer);
+    }
+
+    [HarmonyPatch(typeof(Container), "Load")]
+    static class FakeContainerLoadPatch
+    {
+        static bool Prefix(Container __instance) =>
+            !(Plugin._crateUIOpen && __instance == Plugin._fakeCrateContainer);
+    }
+
+    [HarmonyPatch(typeof(Container), nameof(Container.IsOwner))]
+    static class FakeContainerIsOwnerPatch
+    {
+        static bool Prefix(Container __instance, ref bool __result)
+        {
+            if (!Plugin._crateUIOpen) return true;
+            __result = true;
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(Container), "IsInUse")]
+    static class FakeContainerIsInUsePatch
+    {
+        static bool Prefix(Container __instance, ref bool __result)
+        {
+            if (!Plugin._crateUIOpen) return true;
+            __result = false;
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(Container), "SetInUse")]
+    static class FakeContainerSetInUsePatch
+    {
+        static bool Prefix(Container __instance) => !Plugin._crateUIOpen;
+    }
+
+    // ── Open crate on right-click in inventory ────────────────────────────────
+
+    [HarmonyPatch(typeof(Humanoid), "UseItem",
+        new System.Type[] { typeof(Inventory), typeof(ItemDrop.ItemData), typeof(bool) })]
+    static class CrateUseItemPatch
+    {
+        static bool Prefix(Humanoid __instance, Inventory inventory, ItemDrop.ItemData item, bool fromInventoryGui)
+        {
+            if (!(__instance is Player player) || player != Player.m_localPlayer) return true;
+            if (item?.m_shared?.m_name != "Pilgrim's Cache") return true;
+            if (Plugin._crateUIOpen)
+                Plugin.SaveAndCloseCrateUI();
+            else
+                Plugin.OpenCrateUI(player, item);
+            return false;
+        }
+    }
+
+    // ── Cache contents add to player carry weight ─────────────────────────────
+
+    [HarmonyPatch(typeof(Inventory), nameof(Inventory.GetTotalWeight))]
+    static class CrateWeightPatch
+    {
+        static void Postfix(Inventory __instance, ref float __result)
+        {
+            if (!(Plugin.Cfg?.Cache?.WeightContents ?? true)) return;
+            var player = Player.m_localPlayer;
+            if (player == null || player.GetInventory() != __instance) return;
+            foreach (var item in __instance.GetAllItems())
+            {
+                if (item.m_shared.m_name != "Pilgrim's Cache") continue;
+                if (item.m_customData.TryGetValue("pilgrim_crate_weight", out var ws)
+                    && float.TryParse(ws, System.Globalization.NumberStyles.Float,
+                                      System.Globalization.CultureInfo.InvariantCulture, out var w))
+                    __result += w;
+            }
+        }
+    }
+
+    // ── Wake barrel Rigidbody on load so it falls to ground ──────────────────────
+    // Unity puts Rigidbodies to sleep when placed without velocity; wake it one frame
+    // after ZNetView has synced position so gravity can settle it to the terrain.
+
+    [HarmonyPatch(typeof(ItemDrop), "Awake")]
+    static class CrateWakeOnLoadPatch
+    {
+        static void Postfix(ItemDrop __instance)
+        {
+            if (__instance.m_itemData?.m_shared?.m_name != "Pilgrim's Cache") return;
+            var rb = __instance.GetComponent<Rigidbody>();
+            if (rb == null) return;
+            __instance.StartCoroutine(WakeNextFrame(rb));
+        }
+
+        static System.Collections.IEnumerator WakeNextFrame(Rigidbody rb)
+        {
+            yield return null; // wait one frame for ZNetView to sync position
+            if (rb != null) rb.WakeUp();
+        }
+    }
+
+    // ── Block crafting a second cache + per-quality upgrade requirements ─────────
+
+    [HarmonyPatch(typeof(Player), nameof(Player.HaveRequirements),
+        new System.Type[] { typeof(Recipe), typeof(bool), typeof(int), typeof(int) })]
+    static class CrateCraftLimitPatch
+    {
+        static bool Prefix(Player __instance, Recipe recipe, bool discover, int qualityLevel, int amount, ref bool __result)
+        {
+            if (recipe != Plugin._crateRecipe) return true;
+
+            if (qualityLevel <= 1)
+            {
+                // Block second cache
+                if (__instance.GetInventory().GetAllItems().Any(i => i.m_shared.m_name == "Pilgrim's Cache"))
+                { __result = false; return false; }
+                // Check craft cost directly — bypass m_resources which may be swapped for UI display
+                __result = __instance.GetInventory().CountItems("Copper")       >= 10 * amount &&
+                           __instance.GetInventory().CountItems("LeatherScraps") >=  6 * amount;
+                return false;
+            }
+
+            // Upgrade — check the right metal for this quality level
+            if (qualityLevel >= Plugin.CrateUpgrades.Length) { __result = false; return false; }
+            var (prefab, needed) = Plugin.CrateUpgrades[qualityLevel];
+            __result = !string.IsNullOrEmpty(prefab) &&
+                       __instance.GetInventory().CountItems(prefab) >= needed * amount;
+            return false;
+        }
+    }
+
+    // ── Consume the right upgrade metal ───────────────────────────────────────
+
+    [HarmonyPatch(typeof(Player), nameof(Player.ConsumeResources))]
+    static class CrateUpgradeConsumePatch
+    {
+        static bool Prefix(Player __instance, Piece.Requirement[] requirements, int qualityLevel, int itemQuality, int multiplier)
+        {
+            if (Plugin._crateRecipe == null || requirements != Plugin._crateRecipe.m_resources) return true;
+            if (qualityLevel <= 1)
+            {
+                // Consume craft cost directly
+                __instance.GetInventory().RemoveItem("Copper",       10 * multiplier);
+                __instance.GetInventory().RemoveItem("LeatherScraps", 6 * multiplier);
+                return false;
+            }
+            if (qualityLevel >= Plugin.CrateUpgrades.Length) return false;
+            var (prefab, amount) = Plugin.CrateUpgrades[qualityLevel];
+            if (!string.IsNullOrEmpty(prefab))
+                __instance.GetInventory().RemoveItem(prefab, amount * multiplier);
+            return false;
+        }
+    }
+
+    // ── Preserve cache contents across forge upgrades ─────────────────────────
+    // DoCrafting removes the old item and AddItems a fresh one, losing m_customData.
+
+    [HarmonyPatch(typeof(InventoryGui), "DoCrafting")]
+    static class CrateUpgradeDataPreservePatch
+    {
+        static Dictionary<string, string>? _saved;
+
+        static bool Prefix(InventoryGui __instance)
+        {
+            _saved = null;
+            var fCraftUpgrade = typeof(InventoryGui).GetField("m_craftUpgradeItem", BindingFlags.Instance | BindingFlags.NonPublic);
+            var fCraftRecipe  = typeof(InventoryGui).GetField("m_craftRecipe",      BindingFlags.Instance | BindingFlags.NonPublic);
+            var upgradeItem   = fCraftUpgrade?.GetValue(__instance) as ItemDrop.ItemData;
+            var craftRecipe   = fCraftRecipe?.GetValue(__instance) as Recipe;
+
+            // Block crafting a second cache even when NoCostCheat is active
+            if (upgradeItem == null && craftRecipe == Plugin._crateRecipe)
+            {
+                var player = Player.m_localPlayer;
+                if (player != null && player.GetInventory().GetAllItems()
+                        .Any(i => i.m_shared.m_name == "Pilgrim's Cache"))
+                {
+                    player.Message(MessageHud.MessageType.Center, "You already carry a Pilgrim's Cache.");
+                    return false;
+                }
+            }
+
+            if (upgradeItem?.m_shared?.m_name == "Pilgrim's Cache")
+                _saved = new Dictionary<string, string>(upgradeItem.m_customData);
+            return true;
+        }
+
+        static void Postfix(Player player)
+        {
+            if (_saved == null || player == null) return;
+            var newItem = player.GetInventory().GetAllItems()
+                .FirstOrDefault(i => i.m_shared.m_name == "Pilgrim's Cache");
+            if (newItem != null)
+                foreach (var kv in _saved)
+                    newItem.m_customData[kv.Key] = kv.Value;
+            _saved = null;
+        }
+    }
+
+    // ── Show correct upgrade requirements in crafting UI ──────────────────────
+    // Patch SetupRequirementList directly: it reads m_selectedRecipe.Recipe.m_resources at the top,
+    // so swap m_resources in a Prefix — it already runs after m_selectedRecipe is fully set.
+
+    [HarmonyPatch(typeof(InventoryGui), "SetupRequirementList")]
+    static class CrateUpgradeUIRequirementsPatch
+    {
+        static readonly FieldInfo _fSelectedRecipe = typeof(InventoryGui).GetField("m_selectedRecipe", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        static void Prefix(InventoryGui __instance, int quality)
+        {
+            if (Plugin._crateRecipe == null || Plugin._crateCraftResources == null) return;
+
+            var selected = _fSelectedRecipe?.GetValue(__instance);
+            var craftRecipe = selected?.GetType().GetProperty("Recipe")?.GetValue(selected) as Recipe;
+            if (craftRecipe != Plugin._crateRecipe) return;
+
+            var upgradeItem = selected?.GetType().GetProperty("ItemData")?.GetValue(selected) as ItemDrop.ItemData;
+
+            if (upgradeItem?.m_shared?.m_name == "Pilgrim's Cache")
+            {
+                int targetQuality = upgradeItem.m_quality + 1;
+                if (targetQuality < 2 || targetQuality >= Plugin.CrateUpgrades.Length)
+                { Plugin._crateRecipe.m_resources = Plugin._crateCraftResources; return; }
+
+                var (prefab, amount) = Plugin.CrateUpgrades[targetQuality];
+                var resItem = ObjectDB.instance?.GetItemPrefab(prefab)?.GetComponent<ItemDrop>();
+                if (resItem == null) { Plugin._crateRecipe.m_resources = Plugin._crateCraftResources; return; }
+
+                // GetAmount(q>1) = (q-1)*m_amountPerLevel; amounts chosen so amount/(targetQ-1) is exact
+                int amountPerLevel = amount / (targetQuality - 1);
+                Plugin._crateRecipe.m_resources = new Piece.Requirement[]
+                {
+                    new Piece.Requirement { m_resItem = resItem, m_amount = 0, m_amountPerLevel = amountPerLevel },
+                };
+            }
+            else
+            {
+                Plugin._crateRecipe.m_resources = Plugin._crateCraftResources;
+            }
+        }
+    }
+
+    // ── One Pilgrim's Cache per player ────────────────────────────────────────
+
+    [HarmonyPatch(typeof(Humanoid), nameof(Humanoid.Pickup))]
+    static class CratePickupLimitPatch
+    {
+        static bool Prefix(Humanoid __instance, GameObject go)
+        {
+            if (!(__instance is Player player) || player != Player.m_localPlayer) return true;
+            var drop = go?.GetComponent<ItemDrop>();
+            if (drop?.m_itemData?.m_shared?.m_name != "Pilgrim's Cache") return true;
+            bool alreadyHasOne = player.GetInventory().GetAllItems()
+                .Any(i => i.m_shared.m_name == "Pilgrim's Cache");
+            if (alreadyHasOne)
+            {
+                player.Message(MessageHud.MessageType.Center, "You can only carry one Pilgrim's Cache.");
+                return false;
+            }
+            return true;
+        }
+    }
+
+    // ── Save crate contents when inventory GUI closes ─────────────────────────
+
+    [HarmonyPatch(typeof(InventoryGui), nameof(InventoryGui.Hide))]
+    static class CrateGuiHidePatch
+    {
+        static void Postfix() => Plugin.SaveAndCloseCrateUI();
+    }
+
+    // Close crate UI if the crate item is removed from inventory (dropped, traded, etc.)
+    [HarmonyPatch(typeof(Inventory), "RemoveItem", new System.Type[] { typeof(ItemDrop.ItemData) })]
+    static class CrateItemRemovedPatch
+    {
+        static void Postfix(ItemDrop.ItemData item)
+        {
+            if (item == Plugin._crateItem)
+                Plugin.SaveAndCloseCrateUI();
+        }
+    }
+
+    // ── Filter items added to the crate inventory ─────────────────────────────
+
+    static class CrateFilter
+    {
+    internal static bool Allow(Inventory inv, ItemDrop.ItemData item, int x = -1, int y = -1)
+    {
+        var player = Player.m_localPlayer;
+        string prefab = ItemUtil.PrefabName(item);
+
+        if (item.m_shared.m_itemType != ItemDrop.ItemData.ItemType.Material)
+        {
+            player?.Message(MessageHud.MessageType.Center, "The cache holds materials only.");
+            return false;
+        }
+
+        if (player != null && !Plugin.IsCrateMetalSeen(player, prefab))
+        {
+            player.Message(MessageHud.MessageType.Center, "You haven't carried this before.");
+            return false;
+        }
+
+        // Allow stacking onto an existing slot of the same material
+        bool mergingExisting;
+        if (x >= 0 && y >= 0)
+        {
+            var atSlot = inv.GetItemAt(x, y);
+            mergingExisting = atSlot != null && ItemUtil.PrefabName(atSlot) == prefab;
+        }
+        else
+        {
+            var existing = inv.GetAllItems().FirstOrDefault(i => ItemUtil.PrefabName(i) == prefab);
+            mergingExisting = existing != null && existing.m_stack < existing.m_shared.m_maxStackSize;
+        }
+        if (!mergingExisting && inv.GetAllItems().Any(i => ItemUtil.PrefabName(i) == prefab))
+        {
+            player?.Message(MessageHud.MessageType.Center, "The cache already holds one stack of that.");
+            return false;
+        }
+
+        return true;
+    }
+    } // end CrateFilter
+
+    // Drag-and-drop path: AddItem(item, amount, x, y)
+    [HarmonyPatch(typeof(Inventory), "AddItem",
+        new System.Type[] { typeof(ItemDrop.ItemData), typeof(int), typeof(int), typeof(int) })]
+    static class CrateAddItemPatch
+    {
+        static bool Prefix(Inventory __instance, ItemDrop.ItemData item, int amount, int x, int y,
+                           ref bool __result)
+        {
+            if (__instance != Plugin._crateInventory) return true;
+            if (CrateFilter.Allow(__instance, item, x, y)) return true;
+            __result = false;
+            return false;
+        }
+    }
+
+    // ctrl+click path: AddItem(item) — no position, finds a free slot
+    [HarmonyPatch(typeof(Inventory), "AddItem",
+        new System.Type[] { typeof(ItemDrop.ItemData) })]
+    static class CrateAddItemNoPosPatch
+    {
+        static bool Prefix(Inventory __instance, ItemDrop.ItemData item, ref bool __result)
+        {
+            if (__instance != Plugin._crateInventory) return true;
+
+            var player = Player.m_localPlayer;
+            string prefab = ItemUtil.PrefabName(item);
+
+            if (item.m_shared.m_itemType != ItemDrop.ItemData.ItemType.Material)
+            {
+                player?.Message(MessageHud.MessageType.Center, "The cache holds materials only.");
+                __result = false;
+                return false;
+            }
+            if (player != null && !Plugin.IsCrateMetalSeen(player, prefab))
+            {
+                player.Message(MessageHud.MessageType.Center, "You haven't carried this before.");
+                __result = false;
+                return false;
+            }
+
+            var existing = __instance.GetAllItems().FirstOrDefault(i => ItemUtil.PrefabName(i) == prefab);
+            if (existing == null) return true; // no stack yet, let original place it freely
+
+            int room = existing.m_shared.m_maxStackSize - existing.m_stack;
+            if (room <= 0)
+            {
+                player?.Message(MessageHud.MessageType.Center, "The cache already holds one stack of that.");
+                __result = false;
+                return false;
+            }
+
+            // Stack only what fits; do it manually so the original loop can't spill into a new slot
+            int toMove = Mathf.Min(item.m_stack, room);
+            existing.m_stack += toMove;
+            item.m_stack    -= toMove;
+            __result = item.m_stack == 0; // MoveItemToThis removes source only when fully moved
+            __instance.m_onChanged?.Invoke();
+            return false;
+        }
+    }
+
+    // Pre-check swap before DropItem removes the source item from the crate
+    [HarmonyPatch(typeof(InventoryGrid), "DropItem")]
+    static class CrateDropItemSwapPatch
+    {
+        static bool Prefix(InventoryGrid __instance, Inventory fromInventory,
+                           ItemDrop.ItemData item, int amount, Vector2i pos, ref bool __result)
+        {
+            if (fromInventory != Plugin._crateInventory) return true;
+
+            var targetItem = __instance.GetInventory().GetItemAt(pos.x, pos.y);
+            if (targetItem == null || targetItem == item || item.m_stack != amount) return true;
+
+            if (!CrateFilter.Allow(fromInventory, targetItem))
+            {
+                __result = false;
+                return false;
+            }
+            return true;
+        }
+    }
+
     // ── Config classes ───────────────────────────────────────────────────────
 
     public class PilgrimConfig
     {
         public TrophiesConfig  Trophies { get; set; } = new TrophiesConfig();
+        public CacheConfig     Cache    { get; set; } = new CacheConfig();
         public CartsConfig     Carts    { get; set; } = new CartsConfig();
         public ShipsConfig     Ships    { get; set; } = new ShipsConfig();
         public RitualsConfig   Rituals  { get; set; } = new RitualsConfig();
@@ -5507,6 +6245,7 @@ namespace EnvReporter
         public static PilgrimConfig Default() => new PilgrimConfig
         {
             Trophies = new TrophiesConfig { Enabled = true, Vfx = "fx_fireskeleton_nova" },
+            Cache    = new CacheConfig    { Enabled = true, WeightContents = true },
             Carts    = new CartsConfig    { Enabled = true },
             Ships    = new ShipsConfig    { Enabled = true },
             Rituals  = new RitualsConfig
@@ -5571,6 +6310,12 @@ namespace EnvReporter
     {
         public bool   Enabled { get; set; } = true;
         public string Vfx     { get; set; } = "fx_fireskeleton_nova";
+    }
+
+    public class CacheConfig
+    {
+        public bool Enabled        { get; set; } = true;
+        public bool WeightContents { get; set; } = true;
     }
 
     public class CartsConfig

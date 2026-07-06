@@ -5,7 +5,8 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
 1. Activate forsaken powers from any item stand.
 2. Upgrade cart for more storage, track the cart on the map, quick release button doesn't require loving eye contact with the cart.
 3. Increased storage for ships so you don't have to sail with a cart.
-4. Fire offering rituals:
+4. Pilgrim's Cache - portable, upgradeable storage for a little bit of anything.
+5. Fire offering rituals:
    - Seek the next altar
    - Seek your bed
    - Seek a merchant
@@ -33,6 +34,7 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
    - Become the mountain
    - Carry the shield
    - Raise a sanctuary
+   - Raise a stand of trees
    - Push the mist away
    - Ignite the structure
    - Summon Dyrnwyn

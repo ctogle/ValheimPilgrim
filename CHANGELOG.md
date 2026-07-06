@@ -10,3 +10,4 @@
 | 0.3.5   | 9 hunt rituals (deer through asksvin) with biome-matched spawns, 1-star + 1.8x scale, crow guidance; legendary weapon logout fix; dungeon seeker adds fuling camp |
 | 0.3.6   | Structural ritual system; misc fixes and improvements |
 | 0.3.7   | Version bump |
+| 0.4.0   | Pilgrim's Cache: portable barrel crafted at the forge, holds one stack of any previously-carried material, upgrades 5 tiers (Copper/Bronze/Iron/Silver/BlackMetal) expanding from 12 to 60 slots, contents count toward carry weight; one cache per player |
