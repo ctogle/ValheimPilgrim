@@ -158,15 +158,23 @@ namespace EnvReporter
         internal static ItemDrop.ItemData? FindCacheItem(Player player) =>
             player?.GetInventory().GetAllItems().FirstOrDefault(i => i.m_shared.m_name == "Pilgrim's Cache");
 
-        // Returns the live cache inventory (UI open) or a freshly-deserialized temp one (UI closed).
+        // Closed-UI read cache: avoid deserializing every frame
+        static Inventory? _closedCrateInvCache;
+        static string?    _closedCrateInvCacheKey; // b64 string it was built from
+
+        // Returns the live cache inventory (UI open) or a deserialized read-cache (UI closed).
         internal static Inventory? GetCrateInvForRead(Player player)
         {
             if (_crateInventory != null) return _crateInventory;
             var cacheItem = FindCacheItem(player);
-            if (cacheItem == null) return null;
-            var inv = new Inventory("tmp", null, 6, cacheItem.m_quality * 2);
+            if (cacheItem == null) { _closedCrateInvCache = null; _closedCrateInvCacheKey = null; return null; }
             cacheItem.m_customData.TryGetValue(CrateDataKey, out var b64);
+            if (_closedCrateInvCache != null && _closedCrateInvCacheKey == b64)
+                return _closedCrateInvCache;
+            var inv = new Inventory("tmp", null, 6, cacheItem.m_quality * 2);
             DeserializeCrate(inv, b64);
+            _closedCrateInvCache    = inv;
+            _closedCrateInvCacheKey = b64;
             return inv;
         }
 
@@ -176,7 +184,10 @@ namespace EnvReporter
             if (_crateInventory != null) return; // live inventory — SaveAndCloseCrateUI handles it
             var cacheItem = FindCacheItem(player);
             if (cacheItem == null) return;
-            cacheItem.m_customData[CrateDataKey] = SerializeCrate(inv);
+            var newB64 = SerializeCrate(inv);
+            cacheItem.m_customData[CrateDataKey] = newB64;
+            _closedCrateInvCache    = inv;   // update cache so next read doesn't re-deserialize
+            _closedCrateInvCacheKey = newB64;
             float w = inv.GetAllItems().Sum(i => i.m_stack * i.m_shared.m_weight);
             cacheItem.m_customData["pilgrim_crate_weight"] =
                 w.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -578,6 +589,7 @@ namespace EnvReporter
         internal static float LegendaryExpiry       => FlamingSwordExpiry;
         internal static LegendaryDef _activeLegendaryDef;
         internal static ItemDrop.ItemData? _legendaryActiveItem = null;
+        internal static string? _legendaryActivePrefab = null;
         static ItemDrop.ItemData? _legendaryOrigItem   = null;
         internal static float GiantExpiry          = 0f;
         internal static float ShieldBubbleExpiry   = 0f;
@@ -2866,9 +2878,10 @@ namespace EnvReporter
                 return;
             }
 
-            _activeLegendaryDef  = def;
-            _legendaryOrigItem   = currentRight;
-            _legendaryActiveItem = newItem;
+            _activeLegendaryDef     = def;
+            _legendaryOrigItem      = currentRight;
+            _legendaryActiveItem    = newItem;
+            _legendaryActivePrefab  = def.Prefab;
             player.EquipItem(newItem);
             SpawnSmokePuff(player);
 
@@ -2923,17 +2936,25 @@ namespace EnvReporter
 
         static void FinishLegendarySwapBack(Player player)
         {
-            if (_legendaryActiveItem != null)
+            if (_legendaryActivePrefab != null)
             {
-                player.UnequipItem(_legendaryActiveItem);
-                player.GetInventory().RemoveItem(_legendaryActiveItem);
+                var inv = player.GetInventory();
+                // Always re-resolve by prefab name — stored reference goes stale after in-inventory moves
+                var current = inv.GetAllItems()
+                    .FirstOrDefault(i => i.m_dropPrefab?.name == _legendaryActivePrefab);
+                if (current != null)
+                {
+                    player.UnequipItem(current);
+                    inv.RemoveItem(current);
+                }
                 if (_legendaryOrigItem != null)
                 {
-                    player.GetInventory().AddItem(_legendaryOrigItem);
+                    inv.AddItem(_legendaryOrigItem);
                     player.EquipItem(_legendaryOrigItem);
                 }
-                _legendaryActiveItem = null;
-                _legendaryOrigItem   = null;
+                _legendaryActiveItem   = null;
+                _legendaryActivePrefab = null;
+                _legendaryOrigItem     = null;
             }
             SpawnSmokePuff(player);
             player.GetSEMan().RemoveStatusEffect(LegendarySE?.NameHash() ?? 0);
@@ -4969,8 +4990,9 @@ namespace EnvReporter
                 }
                 else
                 {
-                    Plugin._activeLegendaryDef  = def;
-                    Plugin._legendaryActiveItem = inv.GetAllItems().FirstOrDefault(i => i.m_dropPrefab?.name == def.Prefab);
+                    Plugin._activeLegendaryDef     = def;
+                    Plugin._legendaryActiveItem    = inv.GetAllItems().FirstOrDefault(i => i.m_dropPrefab?.name == def.Prefab);
+                    Plugin._legendaryActivePrefab  = def.Prefab;
                     Plugin.FlamingSwordExpiry   = Time.time + (legExp - nowEpoch);
                     Plugin.Log.LogInfo($"[Pilgrim] Restored legendary {def.Prefab} with {legExp - nowEpoch}s remaining");
                 }
@@ -5932,6 +5954,71 @@ namespace EnvReporter
     // ── Wake barrel Rigidbody on load so it falls to ground ──────────────────────
     // Unity puts Rigidbodies to sleep when placed without velocity; wake it one frame
     // after ZNetView has synced position so gravity can settle it to the terrain.
+
+    // ── Block dropping an active legendary weapon ─────────────────────────────
+
+    [HarmonyPatch(typeof(Humanoid), nameof(Humanoid.DropItem))]
+    static class LegendaryDropBlockPatch
+    {
+        static bool Prefix(Humanoid __instance, ItemDrop.ItemData item, ref bool __result)
+        {
+            if (!(__instance is Player player) || player != Player.m_localPlayer) return true;
+            if (Plugin._legendaryActivePrefab == null) return true;
+            if (item.m_dropPrefab?.name != Plugin._legendaryActivePrefab) return true;
+            player.Message(MessageHud.MessageType.Center, "You cannot drop a legendary weapon.");
+            __result = false;
+            return false;
+        }
+    }
+
+    // Block legendary weapon from being dragged or ctrl+clicked into any non-player inventory.
+    // Patching InventoryGrid.DropItem (the single entry point for all drag-drop transfers) is the
+    // only safe place — MoveItemToThis patches fire too late (item already removed from source).
+    [HarmonyPatch(typeof(InventoryGrid), nameof(InventoryGrid.DropItem))]
+    static class LegendaryGridDropBlockPatch
+    {
+        static bool Prefix(InventoryGrid __instance, ItemDrop.ItemData item)
+        {
+            if (Plugin._legendaryActivePrefab == null) return true;
+            if (item.m_dropPrefab?.name != Plugin._legendaryActivePrefab) return true;
+            var player = Player.m_localPlayer;
+            if (player == null) return true;
+            if (__instance.GetInventory() == player.GetInventory()) return true;
+            player.Message(MessageHud.MessageType.Center, "You cannot transfer a legendary weapon.");
+            return false;
+        }
+    }
+
+    // Belt: also block MoveItemToThis so ctrl+click (which bypasses DropItem) is covered.
+    [HarmonyPatch(typeof(Inventory), nameof(Inventory.MoveItemToThis), new System.Type[] { typeof(Inventory), typeof(ItemDrop.ItemData) })]
+    static class LegendaryMoveBlockPatch
+    {
+        static bool Prefix(Inventory __instance, ItemDrop.ItemData item)
+        {
+            if (Plugin._legendaryActivePrefab == null) return true;
+            if (item.m_dropPrefab?.name != Plugin._legendaryActivePrefab) return true;
+            var player = Player.m_localPlayer;
+            if (player == null) return true;
+            if (__instance == player.GetInventory()) return true;
+            player.Message(MessageHud.MessageType.Center, "You cannot transfer a legendary weapon.");
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(Inventory), nameof(Inventory.MoveItemToThis), new System.Type[] { typeof(Inventory), typeof(ItemDrop.ItemData), typeof(int), typeof(int), typeof(int) })]
+    static class LegendaryMoveBlockPatch2
+    {
+        static bool Prefix(Inventory __instance, ItemDrop.ItemData item)
+        {
+            if (Plugin._legendaryActivePrefab == null) return true;
+            if (item.m_dropPrefab?.name != Plugin._legendaryActivePrefab) return true;
+            var player = Player.m_localPlayer;
+            if (player == null) return true;
+            if (__instance == player.GetInventory()) return true;
+            player.Message(MessageHud.MessageType.Center, "You cannot transfer a legendary weapon.");
+            return false;
+        }
+    }
 
     [HarmonyPatch(typeof(ItemDrop), "Awake")]
     static class CrateWakeOnLoadPatch
