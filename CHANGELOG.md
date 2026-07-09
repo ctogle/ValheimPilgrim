@@ -13,3 +13,4 @@
 | 0.4.0   | Pilgrim's Cache: portable barrel crafted at the forge, holds one stack of any previously-carried material, upgrades 5 tiers (Copper/Bronze/Iron/Silver/BlackMetal) expanding from 12 to 60 slots, contents count toward carry weight; one cache per player |
 | 0.4.1   | Fix cache accepting itself via ctrl+click or drag; craft-blocked message when already holding one |
 | 0.4.2   | Cache accepts any item type (not just materials); cache contents count toward crafting requirements and are consumed when crafting; legendary weapons cannot be dropped or transferred to any container while active; ritual cleanup re-resolves legendary by prefab so inventory shuffling can't strand it |
+| 0.4.3   | Fix cache item rearranging deleting items; fix cache item being draggable into itself; fix crafting not consuming resources from cache |

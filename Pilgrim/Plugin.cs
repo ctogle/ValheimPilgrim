@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.4.1")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.4.2")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -6063,7 +6063,8 @@ namespace EnvReporter
             _hadBefore = 0;
             var player = Player.m_localPlayer;
             if (player == null || __instance != player.GetInventory()) return;
-            _hadBefore = __instance.CountItems(name); // player-only count before removal
+            // Count directly from item list — bypasses our CountItems patch which includes cache items
+            _hadBefore = __instance.GetAllItems().Where(i => i.m_shared.m_name == name).Sum(i => i.m_stack);
         }
 
         static void Postfix(Inventory __instance, string name, int amount)
@@ -6308,6 +6309,8 @@ namespace EnvReporter
                            ref bool __result)
         {
             if (__instance != Plugin._crateInventory) return true;
+            // Internal cache rearrange — item already belongs to this inventory, skip filter
+            if (__instance.ContainsItem(item)) return true;
             if (CrateFilter.Allow(__instance, item, x, y)) return true;
             __result = false;
             return false;
@@ -6322,6 +6325,8 @@ namespace EnvReporter
         static bool Prefix(Inventory __instance, ItemDrop.ItemData item, ref bool __result)
         {
             if (__instance != Plugin._crateInventory) return true;
+            // Internal cache rearrange — item already belongs to this inventory, skip filter
+            if (__instance.ContainsItem(item)) return true;
             if (!CrateFilter.Allow(__instance, item)) { __result = false; return false; }
 
             var player = Player.m_localPlayer;
@@ -6362,9 +6367,21 @@ namespace EnvReporter
         static bool Prefix(InventoryGrid __instance, Inventory fromInventory,
                            ItemDrop.ItemData item, int amount, Vector2i pos, ref bool __result)
         {
+            var destInv = __instance.GetInventory();
+
+            // Block dragging the cache item itself into the cache (would remove it from player before AddItem can reject it)
+            if (destInv == Plugin._crateInventory && item.m_shared.m_name == "Pilgrim's Cache")
+            {
+                __result = false;
+                return false;
+            }
+
             if (fromInventory != Plugin._crateInventory) return true;
 
-            var targetItem = __instance.GetInventory().GetItemAt(pos.x, pos.y);
+            // Internal cache rearrange — always allow, no filter needed
+            if (destInv == Plugin._crateInventory) return true;
+
+            var targetItem = destInv.GetItemAt(pos.x, pos.y);
             if (targetItem == null || targetItem == item || item.m_stack != amount) return true;
 
             if (!CrateFilter.Allow(fromInventory, targetItem))
