@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.4.2")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.4.3")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -137,6 +137,10 @@ namespace EnvReporter
         internal static GameObject?       _fakeCrateGo;
         internal static bool              _closingCrateUI = false;
         internal static bool              _crateUIOpen    = false;
+        internal static bool              _openingCrateUI = false;
+        internal static bool              _hidingInventory = false;
+        internal static Container?        _previousContainer = null;
+        internal static bool              _suppressSpawnSet  = false;
         internal static Recipe?                _crateRecipe         = null;
         internal static Piece.Requirement[]?  _crateCraftResources = null;
 
@@ -168,7 +172,7 @@ namespace EnvReporter
             if (_crateInventory != null) return _crateInventory;
             var cacheItem = FindCacheItem(player);
             if (cacheItem == null) { _closedCrateInvCache = null; _closedCrateInvCacheKey = null; return null; }
-            cacheItem.m_customData.TryGetValue(CrateDataKey, out var b64);
+            player.m_customData.TryGetValue(CrateDataKey, out var b64);
             if (_closedCrateInvCache != null && _closedCrateInvCacheKey == b64)
                 return _closedCrateInvCache;
             var inv = new Inventory("tmp", null, 6, cacheItem.m_quality * 2);
@@ -178,19 +182,22 @@ namespace EnvReporter
             return inv;
         }
 
-        // Serialize a temp inventory back to the cache item's customData (no-op when UI is open).
+        // Serialize a temp inventory back to player customData (no-op when UI is open).
         internal static void SaveCrateInvIfClosed(Player player, Inventory inv)
         {
             if (_crateInventory != null) return; // live inventory — SaveAndCloseCrateUI handles it
-            var cacheItem = FindCacheItem(player);
-            if (cacheItem == null) return;
+            if (FindCacheItem(player) == null) return;
             var newB64 = SerializeCrate(inv);
-            cacheItem.m_customData[CrateDataKey] = newB64;
-            _closedCrateInvCache    = inv;   // update cache so next read doesn't re-deserialize
+            player.m_customData[CrateDataKey] = newB64;
+            _closedCrateInvCache    = inv;
             _closedCrateInvCacheKey = newB64;
-            float w = inv.GetAllItems().Sum(i => i.m_stack * i.m_shared.m_weight);
-            cacheItem.m_customData["pilgrim_crate_weight"] =
-                w.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var cacheItem = FindCacheItem(player);
+            if (cacheItem != null)
+            {
+                float w = inv.GetAllItems().Sum(i => i.m_stack * i.m_shared.m_weight);
+                cacheItem.m_customData["pilgrim_crate_weight"] =
+                    w.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
         }
 
         internal static string SerializeCrate(Inventory inv)
@@ -367,7 +374,7 @@ namespace EnvReporter
             int cols = 6;
             int rows = item.m_quality * 2;
             var inv = new Inventory("Pilgrim's Cache", null, cols, rows);
-            item.m_customData.TryGetValue(CrateDataKey, out var b64);
+            player.m_customData.TryGetValue(CrateDataKey, out var b64);
             DeserializeCrate(inv, b64);
 
             // Create a local-only Container (no ZNetView) — Awake suppressed via flag
@@ -405,31 +412,55 @@ namespace EnvReporter
         {
             if (_closingCrateUI) return;
             _closingCrateUI = true;
-            if (_crateItem != null && _crateInventory != null)
+            bool wasCrateOpen = _crateUIOpen;
+            if (_crateInventory != null && Player.m_localPlayer != null)
             {
-                _crateItem.m_customData[CrateDataKey] = SerializeCrate(_crateInventory);
-                float w = _crateInventory.GetAllItems().Sum(i => i.m_stack * i.m_shared.m_weight);
-                _crateItem.m_customData["pilgrim_crate_weight"] =
-                    w.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                Player.m_localPlayer.m_customData[CrateDataKey] = SerializeCrate(_crateInventory);
+                var liveItem = FindCacheItem(Player.m_localPlayer) ?? _crateItem;
+                if (liveItem != null)
+                {
+                    float w = _crateInventory.GetAllItems().Sum(i => i.m_stack * i.m_shared.m_weight);
+                    liveItem.m_customData["pilgrim_crate_weight"] =
+                        w.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                }
             }
             _crateItem      = null;
             _crateInventory = null;
-            // Keep _fakeCrateContainer set until after Hide() so SetInUse/IsOwner patches
-            // still recognise the container during Hide's cleanup calls.
+            // CloseContainer finalises the fake container in the GUI, but must be skipped
+            // when we're called from InventoryGui.Hide — CloseContainer re-shows the
+            // inventory panel, which causes the player to need a second Esc to close.
             var gui = InventoryGui.instance;
-            if (gui != null)
+            if (gui != null && !_hidingInventory)
                 typeof(InventoryGui)
                     .GetMethod("CloseContainer", BindingFlags.Instance | BindingFlags.NonPublic)
                     ?.Invoke(gui, null);
             _crateUIOpen        = false;
             _fakeCrateContainer = null;
             if (_fakeCrateGo != null) { Object.Destroy(_fakeCrateGo); _fakeCrateGo = null; }
+
+            // Restore previous container UI only if the cache was actually open over one
+            var prev = _previousContainer;
+            _previousContainer = null;
+            if (wasCrateOpen && prev != null && prev)
+            {
+                _openingCrateUI = true;
+                InventoryGui.instance?.Show(prev);
+                _openingCrateUI = false;
+            }
+
             _closingCrateUI = false;
         }
 
         // ── Ritual discovery ────────────────────────────────────────────────────
         internal static bool IsRitualKnown(Player player, string key) =>
             player.m_customData.ContainsKey($"ath_known_{key}");
+
+        internal static void RecordRitualUse(Player player, string key)
+        {
+            var dataKey = $"ath_uses_{key}";
+            int count = player.m_customData.TryGetValue(dataKey, out var s) && int.TryParse(s, out var n) ? n : 0;
+            player.m_customData[dataKey] = (count + 1).ToString();
+        }
 
         internal static void LearnRitual(Player player, string key, string itemDisplayName)
         {
@@ -961,6 +992,25 @@ namespace EnvReporter
                     player.m_customData.Remove($"ath_known_{key}");
                 }
                 args.Context.AddString(target == "all" ? "All rituals forgotten." : $"Forgotten: {target}");
+            });
+
+            // ── ath_rituals ─────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("ath_rituals",
+                "ath_rituals — print ritual usage history for this character", args =>
+            {
+                var player = Player.m_localPlayer;
+                if (player == null) return;
+                var lines = new System.Collections.Generic.List<string>();
+                foreach (var (_, _, key, _) in Plugin.RitualItemMap)
+                {
+                    var dataKey = $"ath_uses_{key}";
+                    if (!player.m_customData.TryGetValue(dataKey, out var s)) continue;
+                    lines.Add($"  {key}: {s}");
+                }
+                if (lines.Count == 0) { args.Context.AddString("No rituals performed yet."); return; }
+                lines.Sort();
+                args.Context.AddString("Ritual usage:");
+                foreach (var line in lines) args.Context.AddString(line);
             });
 
             // ── ath_inspect ─────────────────────────────────────────────────
@@ -2332,7 +2382,10 @@ namespace EnvReporter
                         var nb = col.GetComponentInParent<WearNTear>();
                         if (nb == null || nb == current || !visited.Add(nb)) continue;
                         var nbPiece = nb.GetComponent<Piece>();
-                        if (nbPiece == null) { visited.Remove(nb); continue; }
+                        if (nbPiece == null
+                            || nb.GetComponent<CraftingStation>() != null
+                            || nb.GetComponent<StationExtension>() != null)
+                        { visited.Remove(nb); continue; }
                         var nbSnaps = new List<Transform>();
                         nbPiece.GetSnapPoints(nbSnaps);
                         bool snapped = false;
@@ -2494,7 +2547,8 @@ namespace EnvReporter
             var seeds = Physics.OverlapSphere(fpPos, 2f)
                 .Select(c => c.GetComponentInParent<WearNTear>())
                 .Where(w => w != null && w.gameObject != fp.gameObject
-                         && Vector3.Distance(w.transform.position, fpPos) <= 2f)
+                         && Vector3.Distance(w.transform.position, fpPos) <= 2f
+                         && w.GetComponent<Piece>()?.m_category != Piece.PieceCategory.Crafting)
                 .Distinct()
                 .ToList();
             if (seeds.Count == 0)
@@ -2780,13 +2834,20 @@ namespace EnvReporter
             var seeds = Physics.OverlapSphere(fpPos, 2f)
                 .Select(c => c.GetComponentInParent<WearNTear>())
                 .Where(w => w != null && w.gameObject != fp.gameObject
-                         && Vector3.Distance(w.transform.position, fpPos) <= 2f)
+                         && Vector3.Distance(w.transform.position, fpPos) <= 2f
+                         && w.GetComponent<Piece>()?.m_category != Piece.PieceCategory.Crafting)
                 .Distinct().ToList();
             if (seeds.Count == 0)
             { player.Message(MessageHud.MessageType.Center, "Build a structure around this fire first."); return; }
 
             GetStructureFootprint(seeds, out var visited);
             var positions = visited.Select(w => ProjectToTerrain(w.transform.position)).ToList();
+            foreach (var wnt in visited)
+            {
+                var zv = wnt.GetComponent<ZNetView>();
+                if (zv != null && zv.IsValid()) ZNetScene.instance.Destroy(wnt.gameObject);
+                else Object.Destroy(wnt.gameObject);
+            }
             // Serialize as "seedPrefab;x,y,z|x,y,z|..."
             string posStr  = string.Join("|", positions.Select(p => $"{p.x:F2},{p.y:F2},{p.z:F2}"));
             player.m_customData[TreeStandKey] = $"{seedPrefab};{posStr}";
@@ -3537,13 +3598,13 @@ namespace EnvReporter
 
             Plugin.SpawnRitualVFX(fp.transform.position, __instance.transform.position);
             float ritualMult = Plugin.RitualMultiplier(fp, __instance);
-            void Consume() { CartUpgrade.RemoveByPrefab(__instance.GetInventory(), prefab, 1); Plugin.RitualCooldownRemaining = Plugin.RitualCooldownDuration; }
+            void Consume(string ritualKey = "") { CartUpgrade.RemoveByPrefab(__instance.GetInventory(), prefab, 1); Plugin.RitualCooldownRemaining = Plugin.RitualCooldownDuration; if (!string.IsNullOrEmpty(ritualKey)) Plugin.RecordRitualUse(__instance, ritualKey); }
 
             if (prefab == Plugin.SeekFood)
             {
                 if (__instance.GetSEMan().HaveStatusEffect(Plugin.GuidingWindSE?.NameHash() ?? 0))
                 { __instance.Message(MessageHud.MessageType.Center, "The wind already guides you."); return false; }
-                Consume(); Plugin.ActivateSeek(message: RitualMsg("seek_altar", "The wind stirs."), mult: ritualMult, ingredient: prefab); return false;
+                Consume("seek_altar"); Plugin.ActivateSeek(message: RitualMsg("seek_altar", "The wind stirs."), mult: ritualMult, ingredient: prefab); return false;
             }
             if (prefab.StartsWith("Mushroom"))
             {
@@ -3551,53 +3612,53 @@ namespace EnvReporter
                 var cdField = typeof(Player).GetField("m_guardianPowerCooldown", rf0);
                 float cd0 = cdField?.GetValue(__instance) is float v ? v : 0f;
                 if (cd0 <= 0f) { __instance.Message(MessageHud.MessageType.Center, "Your power is already ready."); return false; }
-                Consume(); Plugin.ActivateCooldownReset(__instance, RitualMsg("restore_power", "The storm answers."), ritualMult); return false;
+                Consume("restore_power"); Plugin.ActivateCooldownReset(__instance, RitualMsg("restore_power", "The storm answers."), ritualMult); return false;
             }
             if (prefab == Plugin.HomeFood)
             {
-                Consume(); Plugin.ActivateHomeSeek(__instance, RitualMsg("seek_bed", "The flower carries you home...")); return false;
+                Consume("seek_bed"); Plugin.ActivateHomeSeek(__instance, RitualMsg("seek_bed", "The flower carries you home...")); return false;
             }
             if (prefab == Plugin.FeatherFood)
             {
-                Consume(); Plugin.ActivateFeatherRitual(__instance, RitualMsg("feather_fall", "The feathers catch the wind."), ritualMult); return false;
+                Consume("feather_fall"); Plugin.ActivateFeatherRitual(__instance, RitualMsg("feather_fall", "The feathers catch the wind."), ritualMult); return false;
             }
             if (prefab == Plugin.TraderFood)
             {
-                Consume(); Plugin.ActivateTraderSeek(__instance); return false;
+                Consume("seek_trader"); Plugin.ActivateTraderSeek(__instance); return false;
             }
             if (prefab.StartsWith("Trophy"))
             {
-                Consume(); Plugin.ActivateDungeonSeek(__instance, prefab, RitualMsg("seek_dungeon", "The veil parts — something stirs nearby.")); return false;
+                Consume("seek_dungeon"); Plugin.ActivateDungeonSeek(__instance, prefab, RitualMsg("seek_dungeon", "The veil parts — something stirs nearby.")); return false;
             }
             if (prefab == "GreydwarfEye")
             {
-                Consume(); Plugin.ActivateClearSkies(__instance, RitualMsg("clear_skies", "The clouds part."), ritualMult); return false;
+                Consume("clear_skies"); Plugin.ActivateClearSkies(__instance, RitualMsg("clear_skies", "The clouds part."), ritualMult); return false;
             }
             if (prefab == "Stone")
             {
-                Consume(); Plugin.ActivateWaterWalk(__instance, RitualMsg("water_walk", "The sea grows still beneath your feet."), ritualMult); return false;
+                Consume("water_walk"); Plugin.ActivateWaterWalk(__instance, RitualMsg("water_walk", "The sea grows still beneath your feet."), ritualMult); return false;
             }
             if (prefab == Plugin.GrowthFood)
             {
                 if (Plugin.GrowthBlessingActive)
                 { __instance.Message(MessageHud.MessageType.Center, "The seed's blessing already waits in your dreams."); return false; }
-                Consume(); Plugin.GrowthBlessingActive = true;
+                Consume("growth"); Plugin.GrowthBlessingActive = true;
                 __instance.Message(MessageHud.MessageType.Center, RitualMsg("growth", "The seed remembers the earth. Sleep, and your crops will answer."));
                 return false;
             }
             if (prefab == Plugin.PlayerSeekFood)
             {
-                Consume(); Plugin.ActivatePlayerSeek(__instance); return false;
+                Consume("seek_player"); Plugin.ActivatePlayerSeek(__instance); return false;
             }
             if (prefab == Plugin.KindleFood)
             {
-                Consume(); Plugin.ActivateKindle(__instance, RitualMsg("kindle", "The darkness yields.")); return false;
+                Consume("kindle"); Plugin.ActivateKindle(__instance, RitualMsg("kindle", "The darkness yields.")); return false;
             }
             if (prefab == Plugin.TameFood)
             {
                 if (Plugin.TameBlessingActive)
                 { __instance.Message(MessageHud.MessageType.Center, "The bond already waits in your dreams."); return false; }
-                Consume(); Plugin.TameBlessingActive = true;
+                Consume("tame_flock"); Plugin.TameBlessingActive = true;
                 __instance.Message(MessageHud.MessageType.Center, RitualMsg("tame_flock", "The bones remember loyalty. Sleep, and your flock will answer."));
                 return false;
             }
@@ -3605,54 +3666,54 @@ namespace EnvReporter
             {
                 if (Plugin.MeadBlessingActive)
                 { __instance.Message(MessageHud.MessageType.Center, "The mead already ripens in your dreams."); return false; }
-                Consume(); Plugin.MeadBlessingActive = true;
+                Consume("mead_ripen"); Plugin.MeadBlessingActive = true;
                 __instance.Message(MessageHud.MessageType.Center, RitualMsg("mead_ripen", "The grain remembers the harvest. Sleep, and your mead will answer."));
                 return false;
             }
             if (prefab == Plugin.GiantFood)
             {
                 if (RitualEnabled("giant"))
-                { Consume(); Plugin.ActivateGiant(__instance, RitualMsg("giant", "The mountain answers. You are vast."), ritualMult); return false; }
+                { Consume("giant"); Plugin.ActivateGiant(__instance, RitualMsg("giant", "The mountain answers. You are vast."), ritualMult); return false; }
             }
             if (prefab == Plugin.WardFood)
             {
-                Consume(); Plugin.ActivateWard(__instance, fp, RitualMsg("ward_bubble", "A ward rises. None shall pass.")); return false;
+                Consume("ward_bubble"); Plugin.ActivateWard(__instance, fp, RitualMsg("ward_bubble", "A ward rises. None shall pass.")); return false;
             }
             if (prefab == Plugin.CampfireWardFood && RitualEnabled("campfire_ward"))
             {
                 float wardDur = (Plugin.Cfg.Rituals.Items.GetValueOrDefault("campfire_ward")?.Duration ?? 60f) * ritualMult;
-                Consume(); Plugin.ActivateCampfireWard(__instance, fp, RitualMsg("campfire_ward", "A sanctuary rises. None shall enter."), wardDur); return false;
+                Consume("campfire_ward"); Plugin.ActivateCampfireWard(__instance, fp, RitualMsg("campfire_ward", "A sanctuary rises. None shall enter."), wardDur); return false;
             }
             if (prefab == Plugin.RepairFood && RitualEnabled("repair"))
             {
-                Consume(); Plugin.ActivateRepair(__instance, fp, RitualMsg("repair", "The fire remembers. Your works are mended.")); return false;
+                Consume("repair"); Plugin.ActivateRepair(__instance, fp, RitualMsg("repair", "The fire remembers. Your works are mended.")); return false;
             }
             if (prefab == Plugin.TarMoatFood && RitualEnabled("tar_moat"))
             {
-                Consume(); Plugin.ActivateTarMoat(__instance, fp, RitualMsg("tar_moat", "The earth bleeds black. None shall cross.")); return false;
+                Consume("tar_moat"); Plugin.ActivateTarMoat(__instance, fp, RitualMsg("tar_moat", "The earth bleeds black. None shall cross.")); return false;
             }
             if (prefab == Plugin.FireWallFood && RitualEnabled("fire_wall"))
             {
-                Consume(); Plugin.ActivateFireWall(__instance, fp, RitualMsg("fire_wall", "The structure burns. None shall pass.")); return false;
+                Consume("fire_wall"); Plugin.ActivateFireWall(__instance, fp, RitualMsg("fire_wall", "The structure burns. None shall pass.")); return false;
             }
             if (prefab == Plugin.CorpseFood && RitualEnabled("seek_corpse"))
             {
-                Consume(); Plugin.ActivateCorpseSeek(__instance, RitualMsg("seek_corpse", "The bones remember. Return to what was lost.")); return false;
+                Consume("seek_corpse"); Plugin.ActivateCorpseSeek(__instance, RitualMsg("seek_corpse", "The bones remember. Return to what was lost.")); return false;
             }
             if (prefab == Plugin.MistFood && RitualEnabled("clear_mist"))
             {
-                Consume(); Plugin.ActivateClearMist(__instance, fp, RitualMsg("clear_mist", "The wisp answers. Mist retreats."), ritualMult); return false;
+                Consume("clear_mist"); Plugin.ActivateClearMist(__instance, fp, RitualMsg("clear_mist", "The wisp answers. Mist retreats."), ritualMult); return false;
             }
             if (Plugin.TreeStandSeeds.ContainsKey(prefab) && RitualEnabled("tree_stand"))
             {
                 if (__instance.m_customData.ContainsKey(Plugin.TreeStandKey))
                 { __instance.Message(MessageHud.MessageType.Center, "The forest already waits in your dreams."); return false; }
-                Consume(); Plugin.ActivateTreeStand(__instance, fp, prefab, RitualMsg("tree_stand", "The seeds remember the earth. Sleep, and the forest will answer.")); return false;
+                Consume("tree_stand"); Plugin.ActivateTreeStand(__instance, fp, prefab, RitualMsg("tree_stand", "The seeds remember the earth. Sleep, and the forest will answer.")); return false;
             }
             var huntMatch = System.Array.Find(Plugin.HuntDefs, d => prefab == Plugin.HuntIngredient(d) && RitualEnabled(d.Key));
             if (huntMatch.Key != null)
             {
-                if (Plugin.ActivateHunt(huntMatch, __instance, fp, RitualMsg(huntMatch.Key, huntMatch.DefaultMessage))) Consume();
+                if (Plugin.ActivateHunt(huntMatch, __instance, fp, RitualMsg(huntMatch.Key, huntMatch.DefaultMessage))) Consume(huntMatch.Key);
                 return false;
             }
             if (Plugin.LegendaryIngredientMatch(prefab) is string legendaryKey && RitualEnabled(legendaryKey))
@@ -3662,7 +3723,7 @@ namespace EnvReporter
                 var held = typeof(Humanoid).GetField("m_rightItem", rf3)?.GetValue(__instance) as ItemDrop.ItemData;
                 if (held?.m_shared?.m_skillType != def.SkillType)
                 { __instance.Message(MessageHud.MessageType.Center, $"You must hold a {def.SkillLabel} to answer the call."); return false; }
-                Consume(); Plugin.ActivateLegendaryWeapon(def, __instance, RitualMsg(legendaryKey, def.DefaultActivateMsg), ritualMult); return false;
+                Consume(legendaryKey); Plugin.ActivateLegendaryWeapon(def, __instance, RitualMsg(legendaryKey, def.DefaultActivateMsg), ritualMult); return false;
             }
 
             // Catch-all: suppress vanilla for any ritual item so we never see game rejection messages
@@ -3840,6 +3901,55 @@ namespace EnvReporter
             Plugin.GrantTrophyPower(player, prefab, vfxPos: player.transform.position);
             return false; // trophy stays on stand — shrine remains
         }
+    }
+
+    // ── Bed: sleep without changing spawn (Shift+E) ─────────────────────────
+
+    [HarmonyPatch(typeof(Bed), "GetHoverText")]
+    [HarmonyPriority(Priority.Last)]
+    static class BedHoverTextPatch
+    {
+        static void Postfix(Bed __instance, ref string __result)
+        {
+            var profile = Game.instance?.GetPlayerProfile();
+            bool isCurrent = profile != null
+                && profile.HaveCustomSpawnPoint()
+                && Vector3.Distance(profile.GetCustomSpawnPoint(), __instance.transform.position) < 1f;
+            if (isCurrent) return;
+            __result += "\n[<color=yellow>Shift+E</color>] Sleep only";
+        }
+    }
+
+    [HarmonyPatch(typeof(Bed), "Interact")]
+    static class BedSleepNoSpawnPatch
+    {
+        static void Prefix()
+        {
+            if (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift))
+                Plugin._suppressSpawnSet = true;
+        }
+        static void Postfix()
+        {
+            Plugin._suppressSpawnSet = false;
+        }
+    }
+
+    // When sleeping without setting spawn, pretend this bed is already current so the sleep path runs.
+    [HarmonyPatch(typeof(Bed), "IsCurrent")]
+    static class BedIsCurrentPatch
+    {
+        static bool Prefix(ref bool __result)
+        {
+            if (!Plugin._suppressSpawnSet) return true;
+            __result = true;
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(PlayerProfile), "SetCustomSpawnPoint")]
+    static class PlayerSetSpawnPointPatch
+    {
+        static bool Prefix() => !Plugin._suppressSpawnSet;
     }
 
     // ── SE_GuidingWind ───────────────────────────────────────────────────────
@@ -4320,6 +4430,21 @@ namespace EnvReporter
 
     // ── Container window auto-resize ────────────────────────────────────────
 
+    // Keep fake container at player position so the auto-close distance check never triggers
+    [HarmonyPatch(typeof(InventoryGui), "UpdateContainer")]
+    static class FakeCratePositionSyncPatch
+    {
+        static void Prefix()
+        {
+            if (Plugin._crateUIOpen && Plugin._fakeCrateGo != null)
+            {
+                var player = Player.m_localPlayer;
+                if (player != null)
+                    Plugin._fakeCrateGo.transform.position = player.transform.position;
+            }
+        }
+    }
+
     [HarmonyPatch(typeof(InventoryGui), "UpdateContainer")]
     static class ContainerWindowResizePatch
     {
@@ -4796,7 +4921,7 @@ namespace EnvReporter
         }
     }
 
-    [HarmonyPatch(typeof(ZNet), "Awake")]
+    [HarmonyPatch(typeof(ZNet), "Start")]
     static class GameStartRpcPatch
     {
         static void Postfix()
@@ -4940,6 +5065,30 @@ namespace EnvReporter
             }
 
             // Track item discovery for Pilgrim's Cache
+            player.m_customData[Plugin.CrateMetalSeenKey(prefab)] = "1";
+        }
+    }
+
+    // Discovery when pulling items from a chest (MoveItemToThis on player inventory)
+    [HarmonyPatch(typeof(Inventory), nameof(Inventory.MoveItemToThis),
+        new System.Type[] { typeof(Inventory), typeof(ItemDrop.ItemData) })]
+    class RitualDiscoveryChestPatch
+    {
+        static void Postfix(Inventory __instance, ItemDrop.ItemData item)
+        {
+            var player = Player.m_localPlayer;
+            if (player == null || __instance != player.GetInventory()) return;
+            if (!Plugin.Cfg.Rituals.Enabled) return;
+            string prefab = item.m_dropPrefab?.name ?? "";
+            if (string.IsNullOrEmpty(prefab)) return;
+            foreach (var (match, isPrefix, key, display) in Plugin.RitualItemMap)
+            {
+                bool matches = isPrefix ? prefab.StartsWith(match) : prefab == match;
+                if (!matches) continue;
+                if (!Plugin.Cfg.Rituals.Items.TryGetValue(key, out var r) || !r.Enabled) continue;
+                if (Plugin.IsRitualKnown(player, key)) continue;
+                Plugin.LearnRitual(player, key, display);
+            }
             player.m_customData[Plugin.CrateMetalSeenKey(prefab)] = "1";
         }
     }
@@ -5818,19 +5967,16 @@ namespace EnvReporter
 
     // ── Pilgrim's Cache marker (identifies our local-only fake Container) ────
 
-    class PilgrimCrateMarker : MonoBehaviour {}
-
-    // ── Register PilgrimCrate in ObjectDB + ZNetScene ────────────────────────
-
-    [HarmonyPatch(typeof(ObjectDB), "Awake")]
-    static class CrateRegisterPatch
+    class PilgrimCrateMarker : MonoBehaviour
     {
-        static void Postfix(ObjectDB __instance)
+        void Update()
         {
-            Plugin.RegisterCrateItem(__instance);
-            Plugin.RegisterCrateRecipe(__instance, ZNetScene.instance);
+            var player = Player.m_localPlayer;
+            if (player != null) transform.position = player.transform.position;
         }
     }
+
+    // ── Register PilgrimCrate in ObjectDB + ZNetScene ────────────────────────
 
     [HarmonyPatch(typeof(ObjectDB), "CopyOtherDB")]
     static class CrateCopyDbPatch
@@ -5851,6 +5997,18 @@ namespace EnvReporter
     }
 
     // Re-inject into m_namedPrefabs each time ZNetScene rebuilds (scene transitions)
+    // When m_dropPrefab is null on a saved item, Valheim falls back to m_shared.m_name ("Pilgrim's Cache")
+    // as the lookup key. Intercept here so UpdateItemHashes() can't wipe it.
+    [HarmonyPatch(typeof(ObjectDB), "GetItemPrefab", typeof(string))]
+    static class CrateGetItemPrefabPatch
+    {
+        static void Postfix(string name, ref GameObject __result)
+        {
+            if (__result == null && (name == "Pilgrim's Cache" || name == "PilgrimCrate") && Plugin._cratePrefabGo != null)
+                __result = Plugin._cratePrefabGo;
+        }
+    }
+
     [HarmonyPatch(typeof(ZNetScene), "Awake")]
     static class CrateZNetScenePatch
     {
@@ -5858,7 +6016,11 @@ namespace EnvReporter
         {
             if (Plugin._cratePrefabGo != null)
                 Plugin.AddCrateToZNetScene(Plugin._cratePrefabGo);
-            Plugin.RegisterCrateRecipe(ObjectDB.instance, __instance);
+            if (ObjectDB.instance != null)
+            {
+                Plugin.RegisterCrateItem(ObjectDB.instance);
+                Plugin.RegisterCrateRecipe(ObjectDB.instance, __instance);
+            }
         }
     }
 
@@ -5918,14 +6080,24 @@ namespace EnvReporter
         new System.Type[] { typeof(Inventory), typeof(ItemDrop.ItemData), typeof(bool) })]
     static class CrateUseItemPatch
     {
+        static readonly BindingFlags RF = BindingFlags.Instance | BindingFlags.NonPublic;
+
         static bool Prefix(Humanoid __instance, Inventory inventory, ItemDrop.ItemData item, bool fromInventoryGui)
         {
             if (!(__instance is Player player) || player != Player.m_localPlayer) return true;
             if (item?.m_shared?.m_name != "Pilgrim's Cache") return true;
             if (Plugin._crateUIOpen)
+            {
                 Plugin.SaveAndCloseCrateUI();
+            }
             else
+            {
+                // Capture whatever container is currently open right now — this is the ground truth.
+                var cur = typeof(InventoryGui).GetField("m_currentContainer", RF)
+                              ?.GetValue(InventoryGui.instance) as Container;
+                Plugin._previousContainer = (cur != null && cur != Plugin._fakeCrateContainer) ? cur : null;
                 Plugin.OpenCrateUI(player, item);
+            }
             return false;
         }
     }
@@ -6035,6 +6207,74 @@ namespace EnvReporter
         {
             yield return null; // wait one frame for ZNetView to sync position
             if (rb != null) rb.WakeUp();
+        }
+    }
+
+    // ── Cache ammo: use arrows from cache when player inventory runs dry ─────────
+
+    [HarmonyPatch(typeof(Inventory), nameof(Inventory.GetAmmoItem))]
+    static class CrateAmmoGetPatch
+    {
+        static void Postfix(Inventory __instance, string ammoName, ref ItemDrop.ItemData __result)
+        {
+            if (__result != null) return;
+            var player = Player.m_localPlayer;
+            if (player == null || __instance != player.GetInventory()) return;
+            var crateInv = Plugin.GetCrateInvForRead(player);
+            __result = crateInv?.GetAmmoItem(ammoName);
+        }
+    }
+
+    [HarmonyPatch(typeof(Inventory), nameof(Inventory.RemoveItem),
+        new System.Type[] { typeof(ItemDrop.ItemData), typeof(int) })]
+    static class CrateAmmoRemovePatch
+    {
+        static bool Prefix(Inventory __instance, ItemDrop.ItemData item, int amount, ref bool __result)
+        {
+            var player = Player.m_localPlayer;
+            if (player == null || __instance != player.GetInventory()) return true;
+            if (__instance.ContainsItem(item)) return true;
+            // Item is from the cache — remove it there instead
+            var crateInv = Plugin.GetCrateInvForRead(player);
+            if (crateInv == null || !crateInv.ContainsItem(item)) return true;
+            crateInv.RemoveItem(item, amount);
+            Plugin.SaveCrateInvIfClosed(player, crateInv);
+            __result = true;
+            return false;
+        }
+    }
+
+    // ── Ships and carts don't take damage when no player is within 30m ──────────
+
+    [HarmonyPatch(typeof(WearNTear), nameof(WearNTear.ApplyDamage))]
+    static class ShipNoPlayerNoDamagePatch
+    {
+        static bool Prefix(WearNTear __instance)
+        {
+            bool isShip = __instance.GetComponentInParent<Ship>() != null;
+            bool isCart = __instance.GetComponentInParent<Vagon>() != null;
+            if (!isShip && !isCart) return true;
+            foreach (var player in Player.GetAllPlayers())
+            {
+                if (Vector3.Distance(player.transform.position, __instance.transform.position) <= 30f)
+                    return true;
+            }
+            return false;
+        }
+    }
+
+    // ── Keys in cache work for doors ─────────────────────────────────────────────
+
+    [HarmonyPatch(typeof(Inventory), nameof(Inventory.HaveItem), new System.Type[] { typeof(string), typeof(bool) })]
+    static class CrateHaveItemPatch
+    {
+        static void Postfix(Inventory __instance, string name, ref bool __result)
+        {
+            if (__result) return;
+            var player = Player.m_localPlayer;
+            if (player == null || __instance != player.GetInventory()) return;
+            var crateInv = Plugin.GetCrateInvForRead(player);
+            if (crateInv != null) __result = crateInv.HaveItem(name);
         }
     }
 
@@ -6247,7 +6487,45 @@ namespace EnvReporter
     [HarmonyPatch(typeof(InventoryGui), nameof(InventoryGui.Hide))]
     static class CrateGuiHidePatch
     {
-        static void Postfix() => Plugin.SaveAndCloseCrateUI();
+        static void Prefix()  => Plugin._hidingInventory = true;
+        static void Postfix() { Plugin.SaveAndCloseCrateUI(); Plugin._hidingInventory = false; }
+    }
+
+    // Auto-open cache when player opens inventory alone; restore previous container when cache closes
+    [HarmonyPatch(typeof(InventoryGui), nameof(InventoryGui.Show))]
+    static class CrateAutoOpenPatch
+    {
+        static void Postfix(InventoryGui __instance, Container container)
+        {
+            if (Plugin._openingCrateUI) return;
+            var player = Player.m_localPlayer;
+            if (player == null) return;
+
+            // Opening near a real container (chest/cart/ship) — remember it so we can restore after cache closes.
+            // If cache happened to auto-open during this show sequence (e.g. Show(null) fired before Show(chest)),
+            // close it silently now — no restore, the real container takes over.
+            if (container != null && container != Plugin._fakeCrateContainer)
+            {
+                if (Plugin._crateUIOpen)
+                {
+                    Plugin._previousContainer = null;
+                    Plugin.SaveAndCloseCrateUI();
+                }
+                Plugin._previousContainer = container;
+                return;
+            }
+
+            // Solo inventory open (no container) — auto-open cache if player has one
+            if (container == null)
+            {
+                Plugin._previousContainer = null;
+                var cacheItem = Plugin.FindCacheItem(player);
+                if (cacheItem == null) return;
+                Plugin._openingCrateUI = true;
+                Plugin.OpenCrateUI(player, cacheItem);
+                Plugin._openingCrateUI = false;
+            }
+        }
     }
 
     // Close crate UI if the crate item is removed from inventory (dropped, traded, etc.)
@@ -6271,12 +6549,6 @@ namespace EnvReporter
         string prefab = ItemUtil.PrefabName(item);
 
         if (item.m_shared.m_name == "Pilgrim's Cache") return false;
-
-        if (player != null && !Plugin.IsCrateMetalSeen(player, prefab))
-        {
-            player.Message(MessageHud.MessageType.Center, "You haven't carried this before.");
-            return false;
-        }
 
         // Allow stacking onto an existing slot of the same material
         bool mergingExisting;
