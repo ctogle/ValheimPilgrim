@@ -210,6 +210,8 @@ namespace EnvReporter
                 pkg.Write(ItemUtil.PrefabName(it));
                 pkg.Write(it.m_stack);
                 pkg.Write(it.m_quality);
+                pkg.Write(it.m_gridPos.x);
+                pkg.Write(it.m_gridPos.y);
             }
             return System.Convert.ToBase64String(pkg.GetArray());
         }
@@ -219,15 +221,22 @@ namespace EnvReporter
             if (string.IsNullOrEmpty(b64)) return;
             try
             {
-                var pkg   = new ZPackage(System.Convert.FromBase64String(b64));
+                var pkg  = new ZPackage(System.Convert.FromBase64String(b64));
                 int count = pkg.ReadInt();
+                int cols  = inv.GetWidth();
+                int rows  = inv.GetHeight();
                 for (int i = 0; i < count; i++)
                 {
                     string name  = pkg.ReadString();
                     int    stack = pkg.ReadInt();
                     int    qual  = pkg.ReadInt();
+                    int    gx    = Mathf.Clamp(pkg.ReadInt(), 0, cols - 1);
+                    int    gy    = Mathf.Clamp(pkg.ReadInt(), 0, rows - 1);
                     if (!string.IsNullOrEmpty(name) && stack > 0)
-                        inv.AddItem(name, stack, qual, 0, 0L, "");
+                    {
+                        var added = inv.AddItem(name, stack, qual, 0, 0L, "");
+                        if (added != null) added.m_gridPos = new Vector2i(gx, gy);
+                    }
                 }
             }
             catch (System.Exception ex) { Log.LogWarning($"[Pilgrim] Crate deserialize failed: {ex.Message}"); }
