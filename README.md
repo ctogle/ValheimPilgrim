@@ -3,10 +3,11 @@
 Pilgrim introduces new mechanics that make it easier to avoid backtracking.
 
 1. Activate forsaken powers from any item stand.
-2. Upgrade cart for more storage, track the cart on the map, quick release button doesn't require loving eye contact with the cart.
-3. Increased storage for ships so you don't have to sail with a cart.
-4. Pilgrim's Cache - portable, upgradeable storage for a little bit of anything.
-5. Fire offering rituals:
+2. Sleep without changing spawn location.
+3. Cart upgrades - more storage, map tracking, hand brake and quick release that don't require loving eye contact with the cart.
+4. Ship upgrades - more storage, map tracking, no damage without nearby player.
+5. Pilgrim's Cache - portable, upgradeable storage for a little bit of anything.
+6. Fire offering rituals:
    - Seek the next altar
    - Seek your bed
    - Seek a merchant

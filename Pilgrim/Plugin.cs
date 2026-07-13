@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.4.3")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -126,6 +126,30 @@ namespace EnvReporter
         // ── Pilgrim's Cache (portable metal crate) ──────────────────────────────
         internal const string CratePrefabName = "PilgrimCrate";
         internal const string CrateDataKey    = "pilgrim_crate";
+
+        internal static string EnsureCrateId(ItemDrop.ItemData item)
+        {
+            if (string.IsNullOrEmpty(item.m_crafterName) || !item.m_crafterName.StartsWith("PC_"))
+                item.m_crafterName = "PC_" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
+            return item.m_crafterName;
+        }
+
+        internal static string CratePlayerKey(ItemDrop.ItemData item) =>
+            "pilgrim_crate_" + EnsureCrateId(item);
+
+        internal static void WriteCrate(Player player, ItemDrop.ItemData item, string b64)
+        {
+            item.m_customData[CrateDataKey] = b64;
+            player.m_customData[CratePlayerKey(item)] = b64;
+        }
+
+        internal static string? ReadCrate(Player player, ItemDrop.ItemData item)
+        {
+            if (item.m_customData.TryGetValue(CrateDataKey, out var b64) && !string.IsNullOrEmpty(b64))
+                return b64;
+            player.m_customData.TryGetValue(CratePlayerKey(item), out var fallback);
+            return fallback;
+        }
         internal static readonly string[] CrateMetals =
             { "Copper", "Tin", "Bronze", "Iron", "Silver", "BlackMetal", "Flametal", "Coins" }; // legacy — filter now uses ItemType.Material
         internal static GameObject?        _cratePrefabGo;
@@ -172,7 +196,7 @@ namespace EnvReporter
             if (_crateInventory != null) return _crateInventory;
             var cacheItem = FindCacheItem(player);
             if (cacheItem == null) { _closedCrateInvCache = null; _closedCrateInvCacheKey = null; return null; }
-            player.m_customData.TryGetValue(CrateDataKey, out var b64);
+            var b64 = ReadCrate(player, cacheItem);
             if (_closedCrateInvCache != null && _closedCrateInvCacheKey == b64)
                 return _closedCrateInvCache;
             var inv = new Inventory("tmp", null, 6, cacheItem.m_quality * 2);
@@ -186,18 +210,15 @@ namespace EnvReporter
         internal static void SaveCrateInvIfClosed(Player player, Inventory inv)
         {
             if (_crateInventory != null) return; // live inventory — SaveAndCloseCrateUI handles it
-            if (FindCacheItem(player) == null) return;
+            var cacheItem = FindCacheItem(player);
+            if (cacheItem == null) return;
             var newB64 = SerializeCrate(inv);
-            player.m_customData[CrateDataKey] = newB64;
+            WriteCrate(player, cacheItem, newB64);
             _closedCrateInvCache    = inv;
             _closedCrateInvCacheKey = newB64;
-            var cacheItem = FindCacheItem(player);
-            if (cacheItem != null)
-            {
-                float w = inv.GetAllItems().Sum(i => i.m_stack * i.m_shared.m_weight);
-                cacheItem.m_customData["pilgrim_crate_weight"] =
-                    w.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
+            float w = inv.GetAllItems().Sum(i => i.m_stack * i.m_shared.m_weight);
+            cacheItem.m_customData["pilgrim_crate_weight"] =
+                w.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
         internal static string SerializeCrate(Inventory inv)
@@ -285,39 +306,45 @@ namespace EnvReporter
 
         internal static void RegisterCrateRecipe(ObjectDB db, ZNetScene zns)
         {
-            if (db == null || zns == null) { Log.LogWarning($"[Pilgrim] Recipe: db={db != null} zns={zns != null}"); return; }
-            if (!(Cfg?.Cache?.Enabled ?? true)) { Log.LogInfo("[Pilgrim] Recipe: Cache disabled"); return; }
-            if (db.m_recipes.Any(r => r != null && r.name == "Recipe_PilgrimCrate")) { Log.LogInfo("[Pilgrim] Recipe: already registered"); return; }
+            if (!(Cfg?.Cache?.Enabled ?? true)) return;
 
-            var crateItem = _cratePrefabGo?.GetComponent<ItemDrop>();
-            if (crateItem == null) { Log.LogWarning("[Pilgrim] Recipe: _cratePrefabGo null"); return; }
+            // Step 1: create recipe in ObjectDB (no station yet — ZNetScene may not exist)
+            if (db != null && !db.m_recipes.Any(r => r != null && r.name == "Recipe_PilgrimCrate"))
+            {
+                var crateItem = _cratePrefabGo?.GetComponent<ItemDrop>();
+                if (crateItem == null) { Log.LogWarning("[Pilgrim] Recipe: _cratePrefabGo null"); return; }
 
-            ItemDrop Res(string name) {
-                var r = db.GetItemPrefab(name)?.GetComponent<ItemDrop>();
-                if (r == null) Log.LogWarning($"[Pilgrim] Recipe: ingredient '{name}' not found");
-                return r;
+                ItemDrop Res(string name) {
+                    var r = db.GetItemPrefab(name)?.GetComponent<ItemDrop>();
+                    if (r == null) Log.LogWarning($"[Pilgrim] Recipe: ingredient '{name}' not found");
+                    return r;
+                }
+
+                var recipe = ScriptableObject.CreateInstance<Recipe>();
+                recipe.name              = "Recipe_PilgrimCrate";
+                recipe.m_item            = crateItem;
+                recipe.m_amount          = 1;
+                recipe.m_minStationLevel = 1;
+                recipe.m_craftingStation = null; // assigned in step 2
+                recipe.m_resources = new Piece.Requirement[]
+                {
+                    new Piece.Requirement { m_resItem = Res("Copper"),        m_amount = 10, m_amountPerLevel = 0 },
+                    new Piece.Requirement { m_resItem = Res("LeatherScraps"), m_amount = 6,  m_amountPerLevel = 0 },
+                };
+
+                _crateRecipe         = recipe;
+                _crateCraftResources = recipe.m_resources;
+                db.m_recipes.Add(recipe);
+                Log.LogInfo("[Pilgrim] Registered Recipe_PilgrimCrate");
             }
 
-            var station = zns.GetPrefab("forge")?.GetComponent<CraftingStation>();
-            Log.LogInfo($"[Pilgrim] Recipe: forge station={station != null}");
-
-            var recipe = ScriptableObject.CreateInstance<Recipe>();
-            recipe.name              = "Recipe_PilgrimCrate";
-            recipe.m_item            = crateItem;
-            recipe.m_amount          = 1;
-            recipe.m_minStationLevel = 1;
-            recipe.m_craftingStation = station;
-            // Craft (Q1) cost only — upgrades use different metals handled via patches
-            recipe.m_resources = new Piece.Requirement[]
+            // Step 2: assign forge station once ZNetScene is available
+            if (zns != null && _crateRecipe != null && _crateRecipe.m_craftingStation == null)
             {
-                new Piece.Requirement { m_resItem = Res("Copper"),       m_amount = 10, m_amountPerLevel = 0 },
-                new Piece.Requirement { m_resItem = Res("LeatherScraps"), m_amount = 6, m_amountPerLevel = 0 },
-            };
-
-            _crateRecipe         = recipe;
-            _crateCraftResources = recipe.m_resources;
-            db.m_recipes.Add(recipe);
-            Log.LogInfo("[Pilgrim] Registered Recipe_PilgrimCrate");
+                var station = zns.GetPrefab("forge")?.GetComponent<CraftingStation>();
+                _crateRecipe.m_craftingStation = station;
+                Log.LogInfo($"[Pilgrim] Recipe: forge station={station != null}");
+            }
         }
 
         internal static void AddCrateToZNetScene(GameObject go)
@@ -383,8 +410,7 @@ namespace EnvReporter
             int cols = 6;
             int rows = item.m_quality * 2;
             var inv = new Inventory("Pilgrim's Cache", null, cols, rows);
-            player.m_customData.TryGetValue(CrateDataKey, out var b64);
-            DeserializeCrate(inv, b64);
+            DeserializeCrate(inv, ReadCrate(player, item));
 
             // Create a local-only Container (no ZNetView) — Awake suppressed via flag
             if (_fakeCrateGo != null) Object.Destroy(_fakeCrateGo);
@@ -424,10 +450,10 @@ namespace EnvReporter
             bool wasCrateOpen = _crateUIOpen;
             if (_crateInventory != null && Player.m_localPlayer != null)
             {
-                Player.m_localPlayer.m_customData[CrateDataKey] = SerializeCrate(_crateInventory);
                 var liveItem = FindCacheItem(Player.m_localPlayer) ?? _crateItem;
                 if (liveItem != null)
                 {
+                    WriteCrate(Player.m_localPlayer, liveItem, SerializeCrate(_crateInventory));
                     float w = _crateInventory.GetAllItems().Sum(i => i.m_stack * i.m_shared.m_weight);
                     liveItem.m_customData["pilgrim_crate_weight"] =
                         w.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -3920,6 +3946,7 @@ namespace EnvReporter
     {
         static void Postfix(Bed __instance, ref string __result)
         {
+            if (!Plugin.Cfg.Beds.SleepWithoutSpawn) return;
             var profile = Game.instance?.GetPlayerProfile();
             bool isCurrent = profile != null
                 && profile.HaveCustomSpawnPoint()
@@ -3934,7 +3961,7 @@ namespace EnvReporter
     {
         static void Prefix()
         {
-            if (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift))
+            if (Plugin.Cfg.Beds.SleepWithoutSpawn && (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)))
                 Plugin._suppressSpawnSet = true;
         }
         static void Postfix()
@@ -5110,6 +5137,7 @@ namespace EnvReporter
         static void Postfix(Player __instance)
         {
             if (__instance != Player.m_localPlayer) return;
+            Plugin.RegisterCrateRecipe(ObjectDB.instance, ZNetScene.instance);
             if (!Plugin.Cfg.Rituals.Enabled) return;
 
             var inv = __instance.GetInventory();
@@ -6025,11 +6053,9 @@ namespace EnvReporter
         {
             if (Plugin._cratePrefabGo != null)
                 Plugin.AddCrateToZNetScene(Plugin._cratePrefabGo);
-            if (ObjectDB.instance != null)
-            {
-                Plugin.RegisterCrateItem(ObjectDB.instance);
-                Plugin.RegisterCrateRecipe(ObjectDB.instance, __instance);
-            }
+            var db = ObjectDB.instance ?? UnityEngine.Object.FindObjectOfType<ObjectDB>();
+            Plugin.RegisterCrateItem(db);
+            Plugin.RegisterCrateRecipe(db, __instance);
         }
     }
 
@@ -6260,12 +6286,14 @@ namespace EnvReporter
     {
         static bool Prefix(WearNTear __instance)
         {
+            if (!Plugin.Cfg.Ships.NoDamageFilter) return true;
             bool isShip = __instance.GetComponentInParent<Ship>() != null;
             bool isCart = __instance.GetComponentInParent<Vagon>() != null;
             if (!isShip && !isCart) return true;
+            float radius = Plugin.Cfg.Ships.NoDamageRadius;
             foreach (var player in Player.GetAllPlayers())
             {
-                if (Vector3.Distance(player.transform.position, __instance.transform.position) <= 30f)
+                if (Vector3.Distance(player.transform.position, __instance.transform.position) <= radius)
                     return true;
             }
             return false;
@@ -6487,6 +6515,7 @@ namespace EnvReporter
                 player.Message(MessageHud.MessageType.Center, "You can only carry one Pilgrim's Cache.");
                 return false;
             }
+            Plugin.EnsureCrateId(drop.m_itemData);
             return true;
         }
     }
@@ -6679,6 +6708,7 @@ namespace EnvReporter
     public class PilgrimConfig
     {
         public TrophiesConfig  Trophies { get; set; } = new TrophiesConfig();
+        public BedsConfig      Beds     { get; set; } = new BedsConfig();
         public CacheConfig     Cache    { get; set; } = new CacheConfig();
         public CartsConfig     Carts    { get; set; } = new CartsConfig();
         public ShipsConfig     Ships    { get; set; } = new ShipsConfig();
@@ -6687,9 +6717,10 @@ namespace EnvReporter
         public static PilgrimConfig Default() => new PilgrimConfig
         {
             Trophies = new TrophiesConfig { Enabled = true, Vfx = "fx_fireskeleton_nova" },
+            Beds     = new BedsConfig     { SleepWithoutSpawn = true },
             Cache    = new CacheConfig    { Enabled = true, WeightContents = true },
             Carts    = new CartsConfig    { Enabled = true },
-            Ships    = new ShipsConfig    { Enabled = true },
+            Ships    = new ShipsConfig    { Enabled = true, NoDamageFilter = true, NoDamageRadius = 30f },
             Rituals  = new RitualsConfig
             {
                 Enabled  = true,
@@ -6765,9 +6796,16 @@ namespace EnvReporter
         public bool Enabled { get; set; } = true;
     }
 
+    public class BedsConfig
+    {
+        public bool SleepWithoutSpawn { get; set; } = true;
+    }
+
     public class ShipsConfig
     {
-        public bool Enabled { get; set; } = true;
+        public bool  Enabled        { get; set; } = true;
+        public bool  NoDamageFilter { get; set; } = true;
+        public float NoDamageRadius { get; set; } = 30f;
     }
 
     public class RitualsConfig
