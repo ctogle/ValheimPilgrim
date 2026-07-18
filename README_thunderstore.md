@@ -23,6 +23,7 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
    - Hunt the lox
    - Hunt the hare
    - Hunt the asksvin
+   - Hunt the serpent
    - Restore your power
    - Fall without fear
    - Clear the skies

@@ -15,3 +15,4 @@
 | 0.4.2   | Cache accepts any item type (not just materials); cache contents count toward crafting requirements and are consumed when crafting; legendary weapons cannot be dropped or transferred to any container while active; ritual cleanup re-resolves legendary by prefab so inventory shuffling can't strand it |
 | 0.4.3   | Fix cache item rearranging deleting items; fix cache item being draggable into itself; fix crafting not consuming resources from cache |
 | 0.5.0   | Sleep without setting spawn; ship damage suppressed without nearby player; numerous fixes to rituals and Pilgrim's Cache |
+| 0.5.1   | Fix cache contents wiped when interacting with a second cache; cache UI panel expands with inventory size; serpent hunt ritual (SerpentScale); ritual hint shows duration for current fire and comfort; kindle ritual radius 300m (hits torches); crops blessing radius 50m; cache weight_scale config (0–1) to reduce carry weight contribution |

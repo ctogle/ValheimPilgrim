@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.0")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.1")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -450,7 +450,7 @@ namespace EnvReporter
             bool wasCrateOpen = _crateUIOpen;
             if (_crateInventory != null && Player.m_localPlayer != null)
             {
-                var liveItem = FindCacheItem(Player.m_localPlayer) ?? _crateItem;
+                var liveItem = _crateItem;
                 if (liveItem != null)
                 {
                     WriteCrate(Player.m_localPlayer, liveItem, SerializeCrate(_crateInventory));
@@ -543,6 +543,7 @@ namespace EnvReporter
             ("BjornHide",     false, "seek_bear",        "Bear Hide"),
             ("TrollHide",     false, "seek_troll",       "Troll Hide"),
             ("Root",          false, "seek_abomination", "Root"),
+            ("SerpentScale",  false, "seek_serpent",     "Serpent Scale"),
             ("WolfPelt",      false, "seek_wolf",        "Wolf Pelt"),
             ("LoxPelt",       false, "seek_lox",         "Lox Pelt"),
             ("HareMeat",      false, "seek_misthare",    "Hare Meat"),
@@ -581,15 +582,16 @@ namespace EnvReporter
 
         internal static readonly HuntDef[] HuntDefs =
         {
-            new HuntDef { Key="seek_deer",        Prefab="Deer",        DefaultIngredient="DeerHide",      Biome=Heightmap.Biome.Meadows,     Scale=1.8f, DefaultHoverText="Hunt the deer",        DefaultMessage="He thinks he's alone.",                   DefaultDistance=100f },
-            new HuntDef { Key="seek_boar",        Prefab="Boar",        DefaultIngredient="LeatherScraps", Biome=Heightmap.Biome.Meadows,     Scale=1.8f, DefaultHoverText="Hunt the boar",        DefaultMessage="The boar roots nearby.",                   DefaultDistance=100f },
-            new HuntDef { Key="seek_bear",        Prefab="Bjorn",       DefaultIngredient="BjornHide",      Biome=Heightmap.Biome.BlackForest, Scale=1.8f, DefaultHoverText="Hunt the bear",        DefaultMessage="A great shadow waits in the trees.",       DefaultDistance=100f },
-            new HuntDef { Key="seek_troll",       Prefab="Troll",       DefaultIngredient="TrollHide",     Biome=Heightmap.Biome.BlackForest, Scale=1.8f, DefaultHoverText="Hunt the troll",       DefaultMessage="The earth shudders.",                      DefaultDistance=100f },
-            new HuntDef { Key="seek_abomination", Prefab="Abomination", DefaultIngredient="Root",          Biome=Heightmap.Biome.Swamp,       Scale=1.8f, DefaultHoverText="Hunt the abomination", DefaultMessage="Something ancient stirs in the roots.",    DefaultDistance=100f },
-            new HuntDef { Key="seek_wolf",        Prefab="Wolf",        DefaultIngredient="WolfPelt",      Biome=Heightmap.Biome.Mountain,    Scale=1.8f, DefaultHoverText="Hunt the wolf",        DefaultMessage="The pack circles.",                        DefaultDistance=100f },
-            new HuntDef { Key="seek_lox",         Prefab="Lox",         DefaultIngredient="LoxPelt",       Biome=Heightmap.Biome.Plains,      Scale=1.8f, DefaultHoverText="Hunt the lox",         DefaultMessage="The plains tremble beneath it.",           DefaultDistance=100f },
-            new HuntDef { Key="seek_misthare",    Prefab="Hare",        DefaultIngredient="HareMeat",      Biome=Heightmap.Biome.Mistlands,   Scale=1.8f, DefaultHoverText="Hunt the hare",        DefaultMessage="It darts through the mist.",               DefaultDistance=100f },
-            new HuntDef { Key="seek_asksvin",     Prefab="Asksvin",     DefaultIngredient="AskHide",   Biome=Heightmap.Biome.AshLands,    Scale=1.8f, DefaultHoverText="Hunt the asksvin",     DefaultMessage="Ash and ember — it hungers.",              DefaultDistance=100f },
+            new HuntDef { Key="seek_deer",        Prefab="Deer",        DefaultIngredient="DeerHide",      Biome=Heightmap.Biome.Meadows,     Scale=1.8f, DefaultHoverText="Hunt the deer",        DefaultMessage="He thinks he's alone.",                   DefaultDistance=150f },
+            new HuntDef { Key="seek_boar",        Prefab="Boar",        DefaultIngredient="LeatherScraps", Biome=Heightmap.Biome.Meadows,     Scale=1.8f, DefaultHoverText="Hunt the boar",        DefaultMessage="The boar roots nearby.",                   DefaultDistance=150f },
+            new HuntDef { Key="seek_bear",        Prefab="Bjorn",       DefaultIngredient="BjornHide",      Biome=Heightmap.Biome.BlackForest, Scale=1.8f, DefaultHoverText="Hunt the bear",        DefaultMessage="A great shadow waits in the trees.",       DefaultDistance=150f },
+            new HuntDef { Key="seek_troll",       Prefab="Troll",       DefaultIngredient="TrollHide",     Biome=Heightmap.Biome.BlackForest, Scale=1.8f, DefaultHoverText="Hunt the troll",       DefaultMessage="The earth shudders.",                      DefaultDistance=150f },
+            new HuntDef { Key="seek_abomination", Prefab="Abomination", DefaultIngredient="Root",          Biome=Heightmap.Biome.Swamp,       Scale=1.8f, DefaultHoverText="Hunt the abomination", DefaultMessage="Something ancient stirs in the roots.",    DefaultDistance=150f },
+            new HuntDef { Key="seek_wolf",        Prefab="Wolf",        DefaultIngredient="WolfPelt",      Biome=Heightmap.Biome.Mountain,    Scale=1.8f, DefaultHoverText="Hunt the wolf",        DefaultMessage="The pack circles.",                        DefaultDistance=150f },
+            new HuntDef { Key="seek_lox",         Prefab="Lox",         DefaultIngredient="LoxPelt",       Biome=Heightmap.Biome.Plains,      Scale=1.8f, DefaultHoverText="Hunt the lox",         DefaultMessage="The plains tremble beneath it.",           DefaultDistance=150f },
+            new HuntDef { Key="seek_misthare",    Prefab="Hare",        DefaultIngredient="HareMeat",      Biome=Heightmap.Biome.Mistlands,   Scale=1.8f, DefaultHoverText="Hunt the hare",        DefaultMessage="It darts through the mist.",               DefaultDistance=150f },
+            new HuntDef { Key="seek_asksvin",     Prefab="Asksvin",     DefaultIngredient="AskHide",   Biome=Heightmap.Biome.AshLands,    Scale=1.8f, DefaultHoverText="Hunt the asksvin",     DefaultMessage="Ash and ember — it hungers.",              DefaultDistance=150f },
+            new HuntDef { Key="seek_serpent",     Prefab="Serpent",     DefaultIngredient="SerpentScale", Biome=Heightmap.Biome.Ocean,      Scale=1.8f, DefaultHoverText="Hunt the serpent",     DefaultMessage="Something vast stirs beneath the waves.", DefaultDistance=150f },
         };
 
         internal static readonly LegendaryDef[] LegendaryDefs =
@@ -1803,7 +1805,7 @@ namespace EnvReporter
 
         internal static void ActivateKindle(Player player, string message = "The darkness yields.")
         {
-            const float radius = 20f;
+            const float radius = 300f;
             int count = 0;
             foreach (var fp in Object.FindObjectsOfType<Fireplace>())
             {
@@ -2277,9 +2279,16 @@ namespace EnvReporter
                 float cx = origin.x + Mathf.Cos(angle) * dist;
                 float cz = origin.z + Mathf.Sin(angle) * dist;
                 if (wg.GetBiome(cx, cz) != def.Biome) continue;
-                float cy = ZoneSystem.instance?.GetSolidHeight(new Vector3(cx, 0f, cz)) ?? origin.y;
-                if (cy < -100f || cy > 2000f) cy = origin.y;
-                spawnPos = new Vector3(cx, cy + 0.5f, cz);
+                float cy;
+                if (def.Biome == Heightmap.Biome.Ocean)
+                    cy = 1f;
+                else
+                {
+                    cy = ZoneSystem.instance?.GetSolidHeight(new Vector3(cx, 0f, cz)) ?? origin.y;
+                    if (cy < -100f || cy > 2000f) cy = origin.y;
+                    cy += 0.5f;
+                }
+                spawnPos = new Vector3(cx, cy, cz);
                 found = true;
                 break;
             }
@@ -3470,11 +3479,25 @@ namespace EnvReporter
             string cdStr    = Plugin.RitualCooldownRemaining > 0f ? $" <color=red>({Plugin.RitualCooldownRemaining:F0}s)</color>" : "";
             string countStr = $" <color={(knownKeys.Count < allKeys.Count ? "yellow" : "green")}>{knownKeys.Count}/{allKeys.Count}</color>";
 
-            __result += $"\n<size=11><color=orange>── Offerings{countStr}{cdStr} ──</color>";
+            __result += $"\n<size=13><color=orange>── Offerings{countStr}{cdStr} ──</color>";
             if (Plugin.ShowHintsEnabled)
             {
+                string domainDurTag = "";
+                if (currentDomain == "Weapons")
+                {
+                    float mult = player != null ? Plugin.RitualMultiplier(__instance, player) : 1f;
+                    foreach (var (k2, _, _) in pageRituals)
+                    {
+                        if (items.TryGetValue(k2, out var rcD) && rcD.Duration > 0f)
+                        {
+                            int secs = Mathf.RoundToInt(rcD.Duration * mult);
+                            domainDurTag = $" <color=grey>(~{secs}s)</color>";
+                            break;
+                        }
+                    }
+                }
                 string domainKnownStr = $" <color={(domainKnown < domainTotal ? "yellow" : "green")}>{domainKnown}/{domainTotal}</color>";
-                __result += $"\n<color=orange>{currentDomain}{domainKnownStr}</color>";
+                __result += $"\n<color=orange>{currentDomain}{domainKnownStr}{domainDurTag}</color>";
                 foreach (var (key, item, hoverText) in pageRituals)
                 {
                     string structureTag = "";
@@ -3790,7 +3813,7 @@ namespace EnvReporter
             Plugin.GrowthBlessingActive = false;
 
             int count = 0;
-            const float radius = 30f;
+            const float radius = 50f;
             var pos = __instance.transform.position;
             foreach (var plant in UnityEngine.Object.FindObjectsOfType<Plant>())
             {
@@ -4509,7 +4532,8 @@ namespace EnvReporter
                         isShip = ShipStoragePatch.ShipLevels.ContainsKey(sn);
                     }
                 }
-                if (!isVagon && !isShip)
+                bool isCrate = currentContainer.GetComponent<PilgrimCrateMarker>() != null;
+                if (!isVagon && !isShip && !isCrate)
                 {
                     RestorePanel(__instance);
                     return;
@@ -6153,7 +6177,10 @@ namespace EnvReporter
                 if (item.m_customData.TryGetValue("pilgrim_crate_weight", out var ws)
                     && float.TryParse(ws, System.Globalization.NumberStyles.Float,
                                       System.Globalization.CultureInfo.InvariantCulture, out var w))
-                    __result += w;
+                {
+                    float scale = Mathf.Clamp01(Plugin.Cfg?.Cache?.WeightScale ?? 1f);
+                    __result += w * scale;
+                }
             }
         }
     }
@@ -6179,6 +6206,40 @@ namespace EnvReporter
     }
 
     // Block legendary weapon from being dragged or ctrl+clicked into any non-player inventory.
+    [HarmonyPatch(typeof(InventoryGrid), nameof(InventoryGrid.DropItem))]
+    static class CrateGridDropBlockPatch
+    {
+        static bool Prefix(InventoryGrid __instance, ItemDrop.ItemData item)
+        {
+            if (item?.m_shared?.m_name != "Pilgrim's Cache") return true;
+            var player = Player.m_localPlayer;
+            if (player == null) return true;
+            if (__instance.GetInventory() != player.GetInventory()) return true;
+            bool alreadyHasOne = player.GetInventory().GetAllItems()
+                .Any(i => i.m_shared.m_name == "Pilgrim's Cache" && i != item);
+            if (!alreadyHasOne) return true;
+            player.Message(MessageHud.MessageType.Center, "You can only carry one Pilgrim's Cache.");
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(Inventory), nameof(Inventory.MoveItemToThis), new System.Type[] { typeof(Inventory), typeof(ItemDrop.ItemData) })]
+    static class CrateMoveBlockPatch
+    {
+        static bool Prefix(Inventory __instance, ItemDrop.ItemData item)
+        {
+            if (item?.m_shared?.m_name != "Pilgrim's Cache") return true;
+            var player = Player.m_localPlayer;
+            if (player == null) return true;
+            if (__instance != player.GetInventory()) return true;
+            bool alreadyHasOne = player.GetInventory().GetAllItems()
+                .Any(i => i.m_shared.m_name == "Pilgrim's Cache" && i != item);
+            if (!alreadyHasOne) return true;
+            player.Message(MessageHud.MessageType.Center, "You can only carry one Pilgrim's Cache.");
+            return false;
+        }
+    }
+
     // Patching InventoryGrid.DropItem (the single entry point for all drag-drop transfers) is the
     // only safe place — MoveItemToThis patches fire too late (item already removed from source).
     [HarmonyPatch(typeof(InventoryGrid), nameof(InventoryGrid.DropItem))]
@@ -6639,23 +6700,14 @@ namespace EnvReporter
             if (__instance.ContainsItem(item)) return true;
             if (!CrateFilter.Allow(__instance, item)) { __result = false; return false; }
 
-            var player = Player.m_localPlayer;
             string prefab = ItemUtil.PrefabName(item);
-
-            if (player != null && !Plugin.IsCrateMetalSeen(player, prefab))
-            {
-                player.Message(MessageHud.MessageType.Center, "You haven't carried this before.");
-                __result = false;
-                return false;
-            }
-
             var existing = __instance.GetAllItems().FirstOrDefault(i => ItemUtil.PrefabName(i) == prefab);
             if (existing == null) return true; // no stack yet, let original place it freely
 
             int room = existing.m_shared.m_maxStackSize - existing.m_stack;
             if (room <= 0)
             {
-                player?.Message(MessageHud.MessageType.Center, "The cache already holds one stack of that.");
+                Player.m_localPlayer?.Message(MessageHud.MessageType.Center, "The cache already holds one stack of that.");
                 __result = false;
                 return false;
             }
@@ -6758,15 +6810,16 @@ namespace EnvReporter
                     ["tar_moat"]      = new RitualItemConfig { Enabled = false, Item = "Obsidian",     HoverText = "Raise a tar moat",           Message = "The earth bleeds black. None shall cross.",        Duration = 60f,       Domain = "Blessings" },
                     ["fire_wall"]     = new RitualItemConfig { Enabled = true, Item = "Ruby",          HoverText = "Ignite the structure",        Message = "The structure burns. None shall pass.",             Duration = 60f,       Domain = "Blessings" },
                     ["tree_stand"]    = new RitualItemConfig { Enabled = true, Item = "FirCone",       HoverText = "Raise a stand of trees",      Message = "The seeds remember the earth. Sleep, and the forest will answer.",         Domain = "Blessings" },
-                    ["seek_deer"]        = new RitualItemConfig { Enabled = true, Item = "DeerHide",      HoverText = "Hunt the deer",        Message = "He thinks he's alone.",                    Distance = 100f, Domain = "Navigation" },
-                    ["seek_boar"]        = new RitualItemConfig { Enabled = true, Item = "LeatherScraps", HoverText = "Hunt the boar",        Message = "The boar roots nearby.",                   Distance = 100f, Domain = "Navigation" },
-                    ["seek_bear"]        = new RitualItemConfig { Enabled = true, Item = "BjornHide",    HoverText = "Hunt the bear",        Message = "A great shadow waits in the trees.",        Distance = 100f, Domain = "Navigation" },
-                    ["seek_troll"]       = new RitualItemConfig { Enabled = true, Item = "TrollHide",     HoverText = "Hunt the troll",       Message = "The earth shudders.",                       Distance = 100f, Domain = "Navigation" },
-                    ["seek_abomination"] = new RitualItemConfig { Enabled = true, Item = "Root",          HoverText = "Hunt the abomination", Message = "Something ancient stirs in the roots.",    Distance = 100f, Domain = "Navigation" },
-                    ["seek_wolf"]        = new RitualItemConfig { Enabled = true, Item = "WolfPelt",      HoverText = "Hunt the wolf",        Message = "The pack circles.",                         Distance = 100f, Domain = "Navigation" },
-                    ["seek_lox"]         = new RitualItemConfig { Enabled = true, Item = "LoxPelt",       HoverText = "Hunt the lox",         Message = "The plains tremble beneath it.",            Distance = 100f, Domain = "Navigation" },
-                    ["seek_misthare"]    = new RitualItemConfig { Enabled = true, Item = "HareMeat",      HoverText = "Hunt the hare",        Message = "It darts through the mist.",                Distance = 100f, Domain = "Navigation" },
-                    ["seek_asksvin"]     = new RitualItemConfig { Enabled = true, Item = "AskHide",   HoverText = "Hunt the asksvin",     Message = "Ash and ember — it hungers.",               Distance = 100f, Domain = "Navigation" },
+                    ["seek_deer"]        = new RitualItemConfig { Enabled = true, Item = "DeerHide",      HoverText = "Hunt the deer",        Message = "He thinks he's alone.",                    Distance = 150f, Domain = "Navigation" },
+                    ["seek_boar"]        = new RitualItemConfig { Enabled = true, Item = "LeatherScraps", HoverText = "Hunt the boar",        Message = "The boar roots nearby.",                   Distance = 150f, Domain = "Navigation" },
+                    ["seek_bear"]        = new RitualItemConfig { Enabled = true, Item = "BjornHide",    HoverText = "Hunt the bear",        Message = "A great shadow waits in the trees.",        Distance = 150f, Domain = "Navigation" },
+                    ["seek_troll"]       = new RitualItemConfig { Enabled = true, Item = "TrollHide",     HoverText = "Hunt the troll",       Message = "The earth shudders.",                       Distance = 150f, Domain = "Navigation" },
+                    ["seek_abomination"] = new RitualItemConfig { Enabled = true, Item = "Root",          HoverText = "Hunt the abomination", Message = "Something ancient stirs in the roots.",    Distance = 150f, Domain = "Navigation" },
+                    ["seek_wolf"]        = new RitualItemConfig { Enabled = true, Item = "WolfPelt",      HoverText = "Hunt the wolf",        Message = "The pack circles.",                         Distance = 150f, Domain = "Navigation" },
+                    ["seek_lox"]         = new RitualItemConfig { Enabled = true, Item = "LoxPelt",       HoverText = "Hunt the lox",         Message = "The plains tremble beneath it.",            Distance = 150f, Domain = "Navigation" },
+                    ["seek_misthare"]    = new RitualItemConfig { Enabled = true, Item = "HareMeat",      HoverText = "Hunt the hare",        Message = "It darts through the mist.",                Distance = 150f, Domain = "Navigation" },
+                    ["seek_asksvin"]     = new RitualItemConfig { Enabled = true, Item = "AskHide",      HoverText = "Hunt the asksvin",     Message = "Ash and ember — it hungers.",               Distance = 150f, Domain = "Navigation" },
+                    ["seek_serpent"]     = new RitualItemConfig { Enabled = true, Item = "SerpentScale",  HoverText = "Hunt the serpent",     Message = "Something vast stirs beneath the waves.",   Distance = 150f, Domain = "Navigation" },
                     ["flaming_sword"] = new RitualItemConfig { Enabled = true, Item = "SurtlingCore",  HoverText = "Summon Dyrnwyn",             Message = "Dyrnwyn answers. Let it burn.", Duration = 60f,                           Domain = "Weapons" },
                     ["jotun_bane"]    = new RitualItemConfig { Enabled = true, Item = "Ooze",          HoverText = "Summon Jotun Bane",          Message = "Jotun Bane answers the call.", Duration = 60f,                           Domain = "Weapons" },
                     ["krom"]          = new RitualItemConfig { Enabled = true, Item = "Copper",        HoverText = "Summon Krom",                Message = "Krom rises from the deep.", Duration = 60f,                              Domain = "Weapons" },
@@ -6787,8 +6840,9 @@ namespace EnvReporter
 
     public class CacheConfig
     {
-        public bool Enabled        { get; set; } = true;
-        public bool WeightContents { get; set; } = true;
+        public bool  Enabled        { get; set; } = true;
+        public bool  WeightContents { get; set; } = true;
+        public float WeightScale    { get; set; } = 1f;
     }
 
     public class CartsConfig
