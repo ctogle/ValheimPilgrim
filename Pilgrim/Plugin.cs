@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.1")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.2")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -20,6 +20,7 @@ namespace EnvReporter
         internal static SE_GuidingWind? GuidingWindSE;
         internal static SE_WaterWalk?   WaterWalkSE;
         internal static SE_Giant?       GiantSE;
+        internal static SE_Burden?      BurdenSE;
         internal static SE_LegendaryWeapon? LegendarySE;
         internal static SE_Shield?      ShieldBubbleSE;
         internal static Material?       WardSphereMat;   // cached from SE_Shield Sphere on first use
@@ -90,6 +91,7 @@ namespace EnvReporter
         internal static string TameFood     => Cfg.Rituals.Items.GetValueOrDefault("tame_flock")?.Item    ?? "BoneFragments";
         internal static string MeadFood      => Cfg.Rituals.Items.GetValueOrDefault("mead_ripen")?.Item   ?? "Barley";
         internal static string GiantFood        => Cfg.Rituals.Items.GetValueOrDefault("giant")?.Item          ?? "YmirRemains";
+        internal static string BurdenFood       => Cfg.Rituals.Items.GetValueOrDefault("burden")?.Item         ?? "RawMeat";
         internal static string WardFood         => Cfg.Rituals.Items.GetValueOrDefault("ward_bubble")?.Item    ?? "Ruby";
         internal static string CampfireWardFood => Cfg.Rituals.Items.GetValueOrDefault("campfire_ward")?.Item ?? "AmberPearl";
         internal static string RepairFood       => Cfg.Rituals.Items.GetValueOrDefault("repair")?.Item         ?? "Coal";
@@ -527,11 +529,13 @@ namespace EnvReporter
             ("Acorn",         false, "tree_stand",     "a tree seed"),
             ("BeechSeeds",    false, "tree_stand",     "a tree seed"),
             ("BirchSeeds",    false, "tree_stand",     "a tree seed"),
+            ("WitheredBone",  false, "rock_stand",     "Withered Bone"),
             ("BoneFragments", false, "tame_flock",     "Bone Fragments"),
             ("Barley",        false, "mead_ripen",     "Barley"),
             ("Resin",         false, "kindle",         "Resin"),
             ("Coal",          false, "repair",         "Coal"),
             ("YmirRemains",   false, "giant",          "Ymir Flesh"),
+            ("RawMeat",       false, "burden",         "Boar Meat"),
             ("Amber",         false, "ward_bubble",    "Amber"),
             ("AmberPearl",    false, "campfire_ward",  "Amber Pearl"),
             ("Obsidian",      false, "tar_moat",       "Obsidian"),
@@ -653,6 +657,9 @@ namespace EnvReporter
         internal static bool  TameBlessingActive   = false;
         internal static bool  MeadBlessingActive   = false;
         internal const  string TreeStandKey        = "ath_tree_stand_positions";
+        internal const  string TreeStandPiecesKey  = "ath_tree_stand_pieces";
+        internal const  string RockStandKey        = "ath_rock_stand_positions";
+        internal const  string RockStandPiecesKey  = "ath_rock_stand_pieces";
         internal static float FlamingSwordExpiry     = 0f; // alias kept for expiry-check sites
         internal static float LegendaryExpiry       => FlamingSwordExpiry;
         internal static LegendaryDef _activeLegendaryDef;
@@ -660,6 +667,7 @@ namespace EnvReporter
         internal static string? _legendaryActivePrefab = null;
         static ItemDrop.ItemData? _legendaryOrigItem   = null;
         internal static float GiantExpiry          = 0f;
+        internal static float BurdenExpiry         = 0f;
         internal static float ShieldBubbleExpiry   = 0f;
         internal static float CampfireWardExpiry   = 0f;
         internal static Coroutine? ActiveStructureRitual = null;
@@ -668,6 +676,7 @@ namespace EnvReporter
         internal static Renderer?   ActiveCampfireWardRend = null;
         internal static float GiantTargetScale     = 1f;
         internal const  float GiantCarryBonus      = 300f;
+        internal static float BurdenCarryBonus     => Cfg?.Rituals?.Items?.GetValueOrDefault("burden")?.CarryBonus ?? 1000f;
         internal const  float GiantScale           = 3f;
         internal const  float GiantWalkMult        = 1.5f;
         internal const  float GiantRunMult         = 2.5f;
@@ -1810,7 +1819,9 @@ namespace EnvReporter
             foreach (var fp in Object.FindObjectsOfType<Fireplace>())
             {
                 if (Vector3.Distance(fp.transform.position, player.transform.position) > radius) continue;
-                fp.SetFuel(fp.m_maxFuel);
+                var nview = fp.GetComponent<ZNetView>();
+                if (nview == null || !nview.IsValid()) continue;
+                nview.InvokeRPC(ZNetView.Everybody, "RPC_SetFuelAmount", fp.m_maxFuel);
                 count++;
             }
             string msg = count > 0 ? message : "No fires nearby to kindle.";
@@ -2016,6 +2027,26 @@ namespace EnvReporter
             if (EnvMan.instance?.m_debugEnv == "WarmSnow") EnvMan.instance.m_debugEnv = "Rain";
             GiantRainExpiry = Time.time + 600f;
             player.Message(MessageHud.MessageType.TopLeft, "You return to mortal scale.");
+        }
+
+        // ── Burden ritual ───────────────────────────────────────────────────
+
+        internal static void ActivateBurden(Player player, string message, float mult = 1f)
+        {
+            float duration = (Cfg.Rituals.Items.GetValueOrDefault("burden")?.Duration ?? 60f) * mult;
+            BurdenExpiry = Time.time + duration;
+            player.m_maxCarryWeight += BurdenCarryBonus;
+            var se = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == "SE_Burden") ?? BurdenSE;
+            if (se != null) { se.m_ttl = duration; player.GetSEMan().AddStatusEffect(se, true); }
+            player.Message(MessageHud.MessageType.Center, message);
+        }
+
+        internal static void DeactivateBurden(Player player)
+        {
+            BurdenExpiry = 0f;
+            player.m_maxCarryWeight = Mathf.Max(player.m_maxCarryWeight - BurdenCarryBonus, 300f);
+            player.GetSEMan().RemoveStatusEffect(BurdenSE?.NameHash() ?? 0);
+            player.Message(MessageHud.MessageType.TopLeft, "The burden lifts.");
         }
 
         // ── Ward bubble ritual ───────────────────────────────────────────────
@@ -2886,15 +2917,43 @@ namespace EnvReporter
 
             GetStructureFootprint(seeds, out var visited);
             var positions = visited.Select(w => ProjectToTerrain(w.transform.position)).ToList();
-            foreach (var wnt in visited)
-            {
-                var zv = wnt.GetComponent<ZNetView>();
-                if (zv != null && zv.IsValid()) ZNetScene.instance.Destroy(wnt.gameObject);
-                else Object.Destroy(wnt.gameObject);
-            }
-            // Serialize as "seedPrefab;x,y,z|x,y,z|..."
+            // Save piece ZDOIDs for exact destruction on sleep (don't destroy yet — looks bad)
+            var zdoIds = visited
+                .Select(w => w.GetComponent<ZNetView>())
+                .Where(zv => zv != null && zv.IsValid())
+                .Select(zv => zv.GetZDO().m_uid)
+                .ToList();
+            string pieceStr = string.Join("|", zdoIds.Select(id => $"{id.UserID}:{id.ID}"));
+            player.m_customData[TreeStandPiecesKey] = pieceStr;
+            // Serialize spawn positions as "seedPrefab;x,y,z|x,y,z|..."
             string posStr  = string.Join("|", positions.Select(p => $"{p.x:F2},{p.y:F2},{p.z:F2}"));
             player.m_customData[TreeStandKey] = $"{seedPrefab};{posStr}";
+            player.Message(MessageHud.MessageType.Center, message);
+        }
+
+        internal static void ActivateRockStand(Player player, Fireplace fp, string message)
+        {
+            var fpPos = fp.transform.position;
+            var seeds = Physics.OverlapSphere(fpPos, 2f)
+                .Select(c => c.GetComponentInParent<WearNTear>())
+                .Where(w => w != null && w.gameObject != fp.gameObject
+                         && Vector3.Distance(w.transform.position, fpPos) <= 2f
+                         && w.GetComponent<Piece>()?.m_category != Piece.PieceCategory.Crafting)
+                .Distinct().ToList();
+            if (seeds.Count == 0)
+            { player.Message(MessageHud.MessageType.Center, "Build a structure around this fire first."); return; }
+
+            GetStructureFootprint(seeds, out var visited);
+            var positions = visited.Select(w => ProjectToTerrain(w.transform.position)).ToList();
+            var zdoIds = visited
+                .Select(w => w.GetComponent<ZNetView>())
+                .Where(zv => zv != null && zv.IsValid())
+                .Select(zv => zv.GetZDO().m_uid)
+                .ToList();
+            string pieceStr = string.Join("|", zdoIds.Select(id => $"{id.UserID}:{id.ID}"));
+            player.m_customData[RockStandPiecesKey] = pieceStr;
+            string posStr = string.Join("|", positions.Select(p => $"{p.x:F2},{p.y:F2},{p.z:F2}"));
+            player.m_customData[RockStandKey] = posStr;
             player.Message(MessageHud.MessageType.Center, message);
         }
 
@@ -3071,6 +3130,7 @@ namespace EnvReporter
         internal static bool HasAnyActiveRitual(Player player)
         {
             if (GiantExpiry        > 0f) return true;
+            if (BurdenExpiry       > 0f) return true;
             if (FlamingSwordExpiry > 0f) return true;
             if (FeatherRitualExpiry > 0f) return true;
             if (WaterWalkExpiry    > 0f) return true;
@@ -3093,6 +3153,7 @@ namespace EnvReporter
 
             // Rituals with dedicated deactivation paths
             if (GiantExpiry > 0f)        DeactivateGiant(player);
+            if (BurdenExpiry > 0f)       DeactivateBurden(player);
             if (FlamingSwordExpiry > 0f) DeactivateLegendaryWeapon(player, immediate: true);
 
             if (ShieldBubbleExpiry > 0f)
@@ -3634,6 +3695,7 @@ namespace EnvReporter
                          || (prefab == Plugin.TameFood       && RitualEnabled("tame_flock"))
                          || (prefab == Plugin.MeadFood       && RitualEnabled("mead_ripen"))
                          || (prefab == Plugin.GiantFood       && RitualEnabled("giant"))
+                         || (prefab == Plugin.BurdenFood      && RitualEnabled("burden"))
                          || (prefab == Plugin.WardFood         && RitualEnabled("ward_bubble"))
                          || (prefab == Plugin.CampfireWardFood && RitualEnabled("campfire_ward"))
                          || (prefab == Plugin.RepairFood       && RitualEnabled("repair"))
@@ -3642,6 +3704,7 @@ namespace EnvReporter
                          || (prefab == Plugin.CorpseFood       && RitualEnabled("seek_corpse"))
                          || (prefab == Plugin.MistFood         && RitualEnabled("clear_mist"))
                          || (Plugin.TreeStandSeeds.ContainsKey(prefab) && RitualEnabled("tree_stand"))
+                         || (prefab == "WitheredBone" && RitualEnabled("rock_stand"))
                          || Plugin.HuntDefs.Any(d => prefab == Plugin.HuntIngredient(d) && RitualEnabled(d.Key))
                          || (Plugin.LegendaryIngredientMatch(prefab) is string lk && RitualEnabled(lk));
             if (!isRitual) return true;
@@ -3733,6 +3796,11 @@ namespace EnvReporter
                 if (RitualEnabled("giant"))
                 { Consume("giant"); Plugin.ActivateGiant(__instance, RitualMsg("giant", "The mountain answers. You are vast."), ritualMult); return false; }
             }
+            if (prefab == Plugin.BurdenFood)
+            {
+                if (RitualEnabled("burden"))
+                { Consume("burden"); Plugin.ActivateBurden(__instance, RitualMsg("burden", "The weight is yours to bear."), ritualMult); return false; }
+            }
             if (prefab == Plugin.WardFood)
             {
                 Consume("ward_bubble"); Plugin.ActivateWard(__instance, fp, RitualMsg("ward_bubble", "A ward rises. None shall pass.")); return false;
@@ -3767,6 +3835,12 @@ namespace EnvReporter
                 if (__instance.m_customData.ContainsKey(Plugin.TreeStandKey))
                 { __instance.Message(MessageHud.MessageType.Center, "The forest already waits in your dreams."); return false; }
                 Consume("tree_stand"); Plugin.ActivateTreeStand(__instance, fp, prefab, RitualMsg("tree_stand", "The seeds remember the earth. Sleep, and the forest will answer.")); return false;
+            }
+            if (prefab == "WitheredBone" && RitualEnabled("rock_stand"))
+            {
+                if (__instance.m_customData.ContainsKey(Plugin.RockStandKey))
+                { __instance.Message(MessageHud.MessageType.Center, "A stand of stones already awaits your rest."); return false; }
+                Consume("rock_stand"); Plugin.ActivateRockStand(__instance, fp, RitualMsg("rock_stand", "The bones remember stone. Sleep, and the earth will answer.")); return false;
             }
             var huntMatch = System.Array.Find(Plugin.HuntDefs, d => prefab == Plugin.HuntIngredient(d) && RitualEnabled(d.Key));
             if (huntMatch.Key != null)
@@ -3880,8 +3954,26 @@ namespace EnvReporter
     {
         static void Postfix(Player __instance, bool sleep)
         {
-            // Fire on wake (sleep=false), only for local player
-            if (sleep || __instance != Player.m_localPlayer) return;
+            if (__instance != Player.m_localPlayer) return;
+
+            // On sleep: destroy the structure pieces now that the screen has faded
+            if (sleep)
+            {
+                if (!__instance.m_customData.TryGetValue(Plugin.TreeStandPiecesKey, out var pieceData)) return;
+                __instance.m_customData.Remove(Plugin.TreeStandPiecesKey);
+                foreach (var entry in pieceData.Split('|'))
+                {
+                    var tokens = entry.Split(':');
+                    if (tokens.Length != 2) continue;
+                    if (!long.TryParse(tokens[0], out long uid) || !uint.TryParse(tokens[1], out uint id)) continue;
+                    var zdoid = new ZDOID(uid, id);
+                    var go = ZNetScene.instance?.FindInstance(zdoid);
+                    if (go != null) ZNetScene.instance.Destroy(go);
+                }
+                return;
+            }
+
+            // On wake (sleep=false): spawn the trees
             if (!__instance.m_customData.TryGetValue(Plugin.TreeStandKey, out var encoded)) return;
             __instance.m_customData.Remove(Plugin.TreeStandKey);
 
@@ -3929,6 +4021,71 @@ namespace EnvReporter
             if (count > 0)
                 __instance.Message(MessageHud.MessageType.TopLeft, $"A stand of {count} {treeFriendly} has taken root.");
             Plugin.Log.LogInfo($"[Pilgrim] Tree stand: spawned {count} {treeName}");
+        }
+    }
+
+    [HarmonyPatch(typeof(Player), "SetSleeping")]
+    class RockStandWakePatch
+    {
+        static readonly string[] RockPrefabs = { "RockDolmen_1", "RockDolmen_2", "RockDolmen_3", "Rock_3", "Rock_4", "Rock_7" };
+
+        static void Postfix(Player __instance, bool sleep)
+        {
+            if (__instance != Player.m_localPlayer) return;
+
+            if (sleep)
+            {
+                if (!__instance.m_customData.TryGetValue(Plugin.RockStandPiecesKey, out var pieceData)) return;
+                __instance.m_customData.Remove(Plugin.RockStandPiecesKey);
+                foreach (var entry in pieceData.Split('|'))
+                {
+                    var tokens = entry.Split(':');
+                    if (tokens.Length != 2) continue;
+                    if (!long.TryParse(tokens[0], out long uid) || !uint.TryParse(tokens[1], out uint id)) continue;
+                    var go = ZNetScene.instance?.FindInstance(new ZDOID(uid, id));
+                    if (go != null) ZNetScene.instance.Destroy(go);
+                }
+                return;
+            }
+
+            if (!__instance.m_customData.TryGetValue(Plugin.RockStandKey, out var encoded)) return;
+            __instance.m_customData.Remove(Plugin.RockStandKey);
+
+            var scene = ZNetScene.instance;
+            if (scene == null) return;
+
+            var positions = encoded.Split('|')
+                .Select(s => s.Split(','))
+                .Where(p => p.Length == 3)
+                .Select(p => new Vector3(float.Parse(p[0]), float.Parse(p[1]), float.Parse(p[2])))
+                .ToList();
+
+            Plugin.Log.LogInfo($"[Pilgrim] Rock stand wake: {positions.Count} positions encoded");
+            int count = 0;
+            foreach (var pos in positions)
+            {
+                string prefabName = RockPrefabs[UnityEngine.Random.Range(0, RockPrefabs.Length)];
+                var rockPrefab = scene.GetPrefab(prefabName);
+                Plugin.Log.LogInfo($"[Pilgrim] Rock stand: GetPrefab({prefabName}) = {(rockPrefab == null ? "NULL" : "found")}");
+                if (rockPrefab == null) continue;
+                var spawnPos = Plugin.ProjectToTerrain(pos);
+                var rot = UnityEngine.Quaternion.Euler(
+                    UnityEngine.Random.Range(-15f, 15f),
+                    UnityEngine.Random.Range(0f, 360f),
+                    UnityEngine.Random.Range(-15f, 15f));
+                float scaleMult = UnityEngine.Random.Range(2.5f, 3.5f);
+                var go = Object.Instantiate(rockPrefab, spawnPos, rot);
+                go.transform.localScale *= scaleMult;
+                spawnPos.y -= go.transform.localScale.y * 0.2f;
+                go.transform.position = spawnPos;
+                var nview = go.GetComponent<ZNetView>();
+                if (nview != null && nview.IsValid())
+                    nview.GetZDO().Set(ZDOVars.s_scaleHash, go.transform.localScale.x);
+                count++;
+            }
+            if (count > 0)
+                __instance.Message(MessageHud.MessageType.TopLeft, $"A stand of {count} stones has risen.");
+            Plugin.Log.LogInfo($"[Pilgrim] Rock stand: spawned {count} rocks");
         }
     }
 
@@ -4142,6 +4299,16 @@ namespace EnvReporter
             __instance.m_StatusEffects.Add(giant);
             Plugin.GiantSE = giant;
 
+            var burden = ScriptableObject.CreateInstance<SE_Burden>();
+            burden.name           = "SE_Burden";
+            burden.m_name         = "Beast of Burden";
+            burden.m_tooltip      = "You carry more than any mortal should.";
+            burden.m_ttl          = 60f;
+            burden.m_startMessage = "";
+            burden.m_stopMessage  = "";
+            __instance.m_StatusEffects.Add(burden);
+            Plugin.BurdenSE = burden;
+
             var dyrnwyn = ScriptableObject.CreateInstance<SE_LegendaryWeapon>();
             dyrnwyn.name           = "SE_LegendaryWeapon";
             dyrnwyn.m_name         = "Legendary Weapon";
@@ -4211,6 +4378,31 @@ namespace EnvReporter
         public override string GetIconText()
         {
             float remaining = Mathf.Max(0f, Plugin.GiantExpiry - Time.time);
+            int mins = (int)(remaining / 60);
+            int secs = (int)(remaining % 60);
+            return mins > 0 ? $"{mins}m {secs:D2}s" : $"{secs}s";
+        }
+    }
+
+    public class SE_Burden : StatusEffect
+    {
+        public override void Setup(Character character)
+        {
+            base.Setup(character);
+            var belt = ObjectDB.instance?.GetItemPrefab("BeltStrength");
+            var icon = belt?.GetComponent<ItemDrop>()?.m_itemData?.m_shared?.m_icons?.FirstOrDefault();
+            if (icon != null) { m_icon = icon; return; }
+            // Fallback to a power icon
+            foreach (var c in new[] { "GP_Bonemass", "GP_Yagluth", "Rested" })
+            {
+                var src = ObjectDB.instance?.m_StatusEffects?.Find(s => s.name == c);
+                if (src?.m_icon != null) { m_icon = src.m_icon; break; }
+            }
+        }
+
+        public override string GetIconText()
+        {
+            float remaining = Mathf.Max(0f, Plugin.BurdenExpiry - Time.time);
             int mins = (int)(remaining / 60);
             int secs = (int)(remaining % 60);
             return mins > 0 ? $"{mins}m {secs:D2}s" : $"{secs}s";
@@ -4569,7 +4761,9 @@ namespace EnvReporter
                     }
                 }
 
-                float newH = rows * cellH + 110f;
+                float idealH  = rows * cellH + 110f;
+                float maxH    = 8 * cellH + 110f; // tier 4 height — tier 5+ scrolls
+                float newH    = Mathf.Min(idealH, maxH);
                 panelRt.sizeDelta = new Vector2(panelRt.sizeDelta.x, newH);
 
                 // Shift center-anchored top elements so they stay at their original
@@ -4578,11 +4772,15 @@ namespace EnvReporter
                 for (int i = 0; i < panelRt.childCount; i++)
                 {
                     var ch = panelRt.GetChild(i) as RectTransform;
-                    if (ch == null || !_origPos.TryGetValue(ch.name, out var orig)) continue;
-                    ch.anchoredPosition = new Vector2(orig.x, orig.y + delta);
-                    // Also stretch ContainerScroll height to match the new grid height
-                    if (ch.name == "ContainerScroll" && _origSize.TryGetValue(ch.name, out var os))
-                        ch.sizeDelta = new Vector2(os.x, os.y + delta * 2f);
+                    if (ch == null) continue;
+                    // ContainerScroll: only resize, never reposition (repositioning pushes it outside the panel)
+                    if (ch.name == "ContainerScroll")
+                    {
+                        if (_origSize.TryGetValue(ch.name, out var os))
+                            ch.sizeDelta = new Vector2(os.x, os.y + delta * 2f);
+                    }
+                    else if (_origPos.TryGetValue(ch.name, out var orig))
+                        ch.anchoredPosition = new Vector2(orig.x, orig.y + delta);
                 }
             }
             catch (System.Exception ex) { Plugin.Log.LogWarning($"[Resize] {ex.Message}"); }
@@ -5245,6 +5443,32 @@ namespace EnvReporter
         }
     }
 
+    // ── Cache survives death: stash before tombstone is packed, restore after ──
+
+    [HarmonyPatch(typeof(Player), "CreateTombStone")]
+    static class CacheSurvivesDeathPatch
+    {
+        static ItemDrop.ItemData? _stashedCache = null;
+
+        static void Prefix(Player __instance)
+        {
+            if (__instance != Player.m_localPlayer) return;
+            if (!(Plugin.Cfg?.Cache?.SurvivesDeath ?? false)) return;
+            var inv = __instance.GetInventory();
+            _stashedCache = inv.GetAllItems().FirstOrDefault(i => i.m_shared.m_name == "Pilgrim's Cache");
+            if (_stashedCache != null)
+                inv.RemoveItem(_stashedCache);
+        }
+
+        static void Postfix(Player __instance)
+        {
+            if (__instance != Player.m_localPlayer) return;
+            if (_stashedCache == null) return;
+            __instance.GetInventory().AddItem(_stashedCache);
+            _stashedCache = null;
+        }
+    }
+
     // ── Z hold (3s): relinquish all active rituals ───────────────────────────
 
     [HarmonyPatch(typeof(Player), "Update")]
@@ -5648,6 +5872,13 @@ namespace EnvReporter
                 var gp = Player.m_localPlayer;
                 if (gp != null) Plugin.DeactivateGiant(gp);
                 else { Plugin.GiantExpiry = 0f; Plugin.GiantTargetScale = 1f; }
+            }
+
+            if (Plugin.BurdenExpiry > 0f && Time.time >= Plugin.BurdenExpiry)
+            {
+                var bp = Player.m_localPlayer;
+                if (bp != null) Plugin.DeactivateBurden(bp);
+                else Plugin.BurdenExpiry = 0f;
             }
 
             if (Plugin.FlamingSwordExpiry > 0f && Time.time >= Plugin.FlamingSwordExpiry)
@@ -6182,6 +6413,26 @@ namespace EnvReporter
                     __result += w * scale;
                 }
             }
+        }
+    }
+
+    // ── Cache container UI weight display respects weight_scale ──────────────────
+
+    [HarmonyPatch(typeof(InventoryGui), "UpdateContainerWeight")]
+    static class CrateContainerWeightDisplayPatch
+    {
+        static void Postfix(InventoryGui __instance)
+        {
+            if (Plugin._fakeCrateContainer == null) return;
+            var containerField = typeof(InventoryGui).GetField("m_currentContainer", BindingFlags.Instance | BindingFlags.NonPublic);
+            if (containerField?.GetValue(__instance) is not Container current || current != Plugin._fakeCrateContainer) return;
+            float scale = Mathf.Clamp01(Plugin.Cfg?.Cache?.WeightScale ?? 1f);
+            if (Mathf.Approximately(scale, 1f)) return;
+            var weightField = typeof(InventoryGui).GetField("m_containerWeight", BindingFlags.Instance | BindingFlags.Public);
+            var weightObj = weightField?.GetValue(__instance);
+            if (weightObj == null) return;
+            float raw = Plugin._crateInventory?.GetTotalWeight() ?? 0f;
+            weightObj.GetType().GetProperty("text")?.SetValue(weightObj, Mathf.CeilToInt(raw * scale).ToString());
         }
     }
 
@@ -6803,6 +7054,7 @@ namespace EnvReporter
                     ["kindle"]        = new RitualItemConfig { Enabled = true, Item = "Resin",         HoverText = "Kindle nearby fires",        Message = "The darkness yields.",                                                     Domain = "Blessings" },
                     ["repair"]        = new RitualItemConfig { Enabled = true, Item = "Coal",          HoverText = "Mend your works",            Message = "The fire remembers. Your works are mended.",                               Domain = "Blessings" },
                     ["giant"]         = new RitualItemConfig { Enabled = true, Item = "YmirRemains",   HoverText = "Become the mountain",        Message = "The mountain answers. You are vast.", Duration = 60f,                     Domain = "Blessings" },
+                    ["burden"]        = new RitualItemConfig { Enabled = true, Item = "RawMeat",       HoverText = "Carry great burdens",        Message = "The weight is yours to bear.", Duration = 60f, CarryBonus = 1000f,         Domain = "Blessings" },
                     ["ward_bubble"]   = new RitualItemConfig { Enabled = true, Item = "Amber",         HoverText = "Carry the shield",          Message = "A ward rises. None shall pass.", Duration = 300f,                         Domain = "Blessings" },
                     ["campfire_ward"] = new RitualItemConfig { Enabled = true, Item = "AmberPearl",    HoverText = "Raise a sanctuary",          Message = "A sanctuary rises. None shall enter.", Duration = 60f,                    Domain = "Blessings" },
                     ["clear_mist"]    = new RitualItemConfig { Enabled = true, Item = "Wisp",        HoverText = "Push the mist away",         Message = "The wisp answers. Mist retreats.", Duration = 120f,                        Domain = "Blessings" },
@@ -6810,6 +7062,7 @@ namespace EnvReporter
                     ["tar_moat"]      = new RitualItemConfig { Enabled = false, Item = "Obsidian",     HoverText = "Raise a tar moat",           Message = "The earth bleeds black. None shall cross.",        Duration = 60f,       Domain = "Blessings" },
                     ["fire_wall"]     = new RitualItemConfig { Enabled = true, Item = "Ruby",          HoverText = "Ignite the structure",        Message = "The structure burns. None shall pass.",             Duration = 60f,       Domain = "Blessings" },
                     ["tree_stand"]    = new RitualItemConfig { Enabled = true, Item = "FirCone",       HoverText = "Raise a stand of trees",      Message = "The seeds remember the earth. Sleep, and the forest will answer.",         Domain = "Blessings" },
+                    ["rock_stand"]    = new RitualItemConfig { Enabled = true, Item = "WitheredBone",  HoverText = "Raise stone",                 Message = "The bones remember stone. Sleep, and the earth will answer.",              Domain = "Blessings" },
                     ["seek_deer"]        = new RitualItemConfig { Enabled = true, Item = "DeerHide",      HoverText = "Hunt the deer",        Message = "He thinks he's alone.",                    Distance = 150f, Domain = "Navigation" },
                     ["seek_boar"]        = new RitualItemConfig { Enabled = true, Item = "LeatherScraps", HoverText = "Hunt the boar",        Message = "The boar roots nearby.",                   Distance = 150f, Domain = "Navigation" },
                     ["seek_bear"]        = new RitualItemConfig { Enabled = true, Item = "BjornHide",    HoverText = "Hunt the bear",        Message = "A great shadow waits in the trees.",        Distance = 150f, Domain = "Navigation" },
@@ -6843,6 +7096,7 @@ namespace EnvReporter
         public bool  Enabled        { get; set; } = true;
         public bool  WeightContents { get; set; } = true;
         public float WeightScale    { get; set; } = 1f;
+        public bool  SurvivesDeath  { get; set; } = false;
     }
 
     public class CartsConfig
@@ -6885,8 +7139,9 @@ namespace EnvReporter
         public string Item      { get; set; } = "";
         public string HoverText { get; set; } = "";
         public string Message   { get; set; } = "";
-        public float  Duration  { get; set; } = 0f;
-        public float  Distance  { get; set; } = 0f;
-        public string Domain    { get; set; } = "Blessings";
+        public float  Duration   { get; set; } = 0f;
+        public float  Distance   { get; set; } = 0f;
+        public float  CarryBonus { get; set; } = 0f;
+        public string Domain     { get; set; } = "Blessings";
     }
 }
