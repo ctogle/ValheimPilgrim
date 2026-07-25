@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.2")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.3")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -530,6 +530,7 @@ namespace EnvReporter
             ("BeechSeeds",    false, "tree_stand",     "a tree seed"),
             ("BirchSeeds",    false, "tree_stand",     "a tree seed"),
             ("WitheredBone",  false, "rock_stand",     "Withered Bone"),
+            ("Entrails",      false, "prime",          "Entrails"),
             ("BoneFragments", false, "tame_flock",     "Bone Fragments"),
             ("Barley",        false, "mead_ripen",     "Barley"),
             ("Resin",         false, "kindle",         "Resin"),
@@ -629,6 +630,30 @@ namespace EnvReporter
             return fireMult * comfortMult;
         }
 
+        internal static string PrimeFood => Cfg?.Rituals?.Items?.GetValueOrDefault("prime")?.Item ?? "Entrails";
+
+        internal static bool IsPrimed(Fireplace fp)
+        {
+            var zdo = fp.GetComponent<ZNetView>()?.GetZDO();
+            if (zdo == null) return false;
+            return !string.IsNullOrEmpty(zdo.GetString(PrimeDayKey, ""));
+        }
+
+        internal static float PrimeMultiplier(Fireplace fp)
+        {
+            var cfg = Cfg?.Rituals?.Items?.GetValueOrDefault("prime");
+            if (cfg == null || !cfg.Enabled) return 1f;
+            var zdo = fp.GetComponent<ZNetView>()?.GetZDO();
+            if (zdo == null) return 1f;
+            var stored = zdo.GetString(PrimeDayKey, "");
+            if (string.IsNullOrEmpty(stored) || !float.TryParse(stored, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float primeDay))
+                return 1f;
+            float t = Mathf.Max(0f, (float)(ZNet.instance.GetTimeSeconds() / EnvMan.instance.m_dayLengthSec) - primeDay);
+            float a = cfg.MultiplierA;
+            float b = cfg.MultiplierB;
+            return Mathf.Clamp(1f + a * t + b * t * t, 1f, 5f);
+        }
+
         // Global ritual cooldown
         internal static float RitualCooldownRemaining = 0f;
         internal static float RitualCooldownDuration  => Cfg.Rituals.Cooldown;
@@ -643,6 +668,8 @@ namespace EnvReporter
 
         // Expiry timestamps (Time.time)
         internal static float FeatherRitualExpiry  = 0f;
+        internal static bool  FeatherJumpActive    = false;
+        internal const  float FeatherJumpMult      = 1.5f;
         internal static float ClearSkiesExpiry     = 0f;
         internal static float RainExpiry           = 0f;
         internal static float GiantRainExpiry      = 0f;
@@ -660,6 +687,7 @@ namespace EnvReporter
         internal const  string TreeStandPiecesKey  = "ath_tree_stand_pieces";
         internal const  string RockStandKey        = "ath_rock_stand_positions";
         internal const  string RockStandPiecesKey  = "ath_rock_stand_pieces";
+        internal const  string PrimeDayKey         = "pilgrim_prime_day";
         internal static float FlamingSwordExpiry     = 0f; // alias kept for expiry-check sites
         internal static float LegendaryExpiry       => FlamingSwordExpiry;
         internal static LegendaryDef _activeLegendaryDef;
@@ -1897,7 +1925,7 @@ namespace EnvReporter
 
         // ── Feather ritual — no fall damage for 60s ─────────────────────────
 
-        internal static void ActivateFeatherRitual(Player player, string message = "Light as a feather — fall without fear.", float mult = 1f)
+        internal static void ActivateFeatherRitual(Player player, string message = "Light as a feather — fall without fear.", float mult = 1f, bool jumpBoost = false)
         {
             // Grab the equip SE from the Feather Cape item prefab
             var capePrefab = ZNetScene.instance?.GetPrefab("CapeFeather");
@@ -1913,13 +1941,19 @@ namespace EnvReporter
 
             // Clone it with a custom TTL so it expires after 60s
             var se = Object.Instantiate(featherSE);
+            se.name           = "SE_PilgrimFeather"; // fixed name so RelinquishAll can remove by hash
             float featherDur  = 60f * mult;
             se.m_ttl          = featherDur;
             se.m_startMessage = "";
             se.m_stopMessage  = "";
 
             player.GetSEMan().AddStatusEffect(se, true);
-            FeatherRitualExpiry = Time.time + featherDur; // fallback patch also active
+            FeatherRitualExpiry = Time.time + featherDur;
+            if (jumpBoost && !FeatherJumpActive)
+            {
+                player.m_jumpForce *= FeatherJumpMult;
+                FeatherJumpActive = true;
+            }
             player.Message(MessageHud.MessageType.Center, message);
         }
 
@@ -3178,9 +3212,12 @@ namespace EnvReporter
             if (FeatherRitualExpiry > 0f)
             {
                 FeatherRitualExpiry = 0f;
-                var featherCape = ZNetScene.instance?.GetPrefab("CapeFeather")?.GetComponent<ItemDrop>();
-                var featherHash = featherCape?.m_itemData?.m_shared?.m_equipStatusEffect?.NameHash() ?? 0;
-                if (featherHash != 0) player.GetSEMan().RemoveStatusEffect(featherHash);
+                player.GetSEMan().RemoveStatusEffect("SE_PilgrimFeather".GetStableHashCode());
+                if (FeatherJumpActive)
+                {
+                    player.m_jumpForce /= FeatherJumpMult;
+                    FeatherJumpActive = false;
+                }
             }
 
             // WaterWalk: remove SE and broadcast wind reset
@@ -3539,8 +3576,9 @@ namespace EnvReporter
 
             string cdStr    = Plugin.RitualCooldownRemaining > 0f ? $" <color=red>({Plugin.RitualCooldownRemaining:F0}s)</color>" : "";
             string countStr = $" <color={(knownKeys.Count < allKeys.Count ? "yellow" : "green")}>{knownKeys.Count}/{allKeys.Count}</color>";
-
-            __result += $"\n<size=13><color=orange>── Offerings{countStr}{cdStr} ──</color>";
+            float pm = Plugin.PrimeMultiplier(__instance);
+            string primeStr = Plugin.IsPrimed(__instance) ? $" <color=#00FFFF>[×{pm:F2}]</color>" : "";
+            __result += $"\n<size=13><color=orange>── Offerings{countStr}{cdStr} ──</color>{primeStr}";
             if (Plugin.ShowHintsEnabled)
             {
                 string domainDurTag = "";
@@ -3705,6 +3743,7 @@ namespace EnvReporter
                          || (prefab == Plugin.MistFood         && RitualEnabled("clear_mist"))
                          || (Plugin.TreeStandSeeds.ContainsKey(prefab) && RitualEnabled("tree_stand"))
                          || (prefab == "WitheredBone" && RitualEnabled("rock_stand"))
+                         || (prefab == Plugin.PrimeFood && RitualEnabled("prime"))
                          || Plugin.HuntDefs.Any(d => prefab == Plugin.HuntIngredient(d) && RitualEnabled(d.Key))
                          || (Plugin.LegendaryIngredientMatch(prefab) is string lk && RitualEnabled(lk));
             if (!isRitual) return true;
@@ -3718,8 +3757,10 @@ namespace EnvReporter
             }
 
             Plugin.SpawnRitualVFX(fp.transform.position, __instance.transform.position);
-            float ritualMult = Plugin.RitualMultiplier(fp, __instance);
-            void Consume(string ritualKey = "") { CartUpgrade.RemoveByPrefab(__instance.GetInventory(), prefab, 1); Plugin.RitualCooldownRemaining = Plugin.RitualCooldownDuration; if (!string.IsNullOrEmpty(ritualKey)) Plugin.RecordRitualUse(__instance, ritualKey); }
+            float primeMult  = Plugin.PrimeMultiplier(fp);
+            float ritualMult = Plugin.RitualMultiplier(fp, __instance) * primeMult;
+            void ClearPrime() { var zdo2 = fp.GetComponent<ZNetView>()?.GetZDO(); if (zdo2 != null) zdo2.Set(Plugin.PrimeDayKey, ""); }
+            void Consume(string ritualKey = "", bool clearPrime = true) { CartUpgrade.RemoveByPrefab(__instance.GetInventory(), prefab, 1); Plugin.RitualCooldownRemaining = Plugin.RitualCooldownDuration; if (!string.IsNullOrEmpty(ritualKey)) Plugin.RecordRitualUse(__instance, ritualKey); if (clearPrime) ClearPrime(); }
 
             if (prefab == Plugin.SeekFood)
             {
@@ -3741,7 +3782,7 @@ namespace EnvReporter
             }
             if (prefab == Plugin.FeatherFood)
             {
-                Consume("feather_fall"); Plugin.ActivateFeatherRitual(__instance, RitualMsg("feather_fall", "The feathers catch the wind."), ritualMult); return false;
+                Consume("feather_fall"); Plugin.ActivateFeatherRitual(__instance, RitualMsg("feather_fall", "The feathers catch the wind."), ritualMult, jumpBoost: primeMult > 1f); return false;
             }
             if (prefab == Plugin.TraderFood)
             {
@@ -3841,6 +3882,16 @@ namespace EnvReporter
                 if (__instance.m_customData.ContainsKey(Plugin.RockStandKey))
                 { __instance.Message(MessageHud.MessageType.Center, "A stand of stones already awaits your rest."); return false; }
                 Consume("rock_stand"); Plugin.ActivateRockStand(__instance, fp, RitualMsg("rock_stand", "The bones remember stone. Sleep, and the earth will answer.")); return false;
+            }
+            if (prefab == Plugin.PrimeFood && RitualEnabled("prime"))
+            {
+                var primeZdo = fp.GetComponent<ZNetView>()?.GetZDO();
+                var existingPrime = primeZdo?.GetString(Plugin.PrimeDayKey, "") ?? "";
+                if (!string.IsNullOrEmpty(existingPrime))
+                { __instance.Message(MessageHud.MessageType.Center, "The gods already listen."); return false; }
+                Consume("prime", clearPrime: false);
+                primeZdo?.Set(Plugin.PrimeDayKey, ((float)(ZNet.instance.GetTimeSeconds() / EnvMan.instance.m_dayLengthSec)).ToString("F4", System.Globalization.CultureInfo.InvariantCulture));
+                __instance.Message(MessageHud.MessageType.Center, RitualMsg("prime", "The offering is made. The gods will answer.")); return false;
             }
             var huntMatch = System.Array.Find(Plugin.HuntDefs, d => prefab == Plugin.HuntIngredient(d) && RitualEnabled(d.Key));
             if (huntMatch.Key != null)
@@ -5482,6 +5533,13 @@ namespace EnvReporter
             if (__instance != Player.m_localPlayer) return;
             if (!Plugin.Cfg.Rituals.Enabled) return;
 
+            // Restore jump force when feather ritual expires naturally
+            if (Plugin.FeatherJumpActive && Time.time > Plugin.FeatherRitualExpiry)
+            {
+                __instance.m_jumpForce /= Plugin.FeatherJumpMult;
+                Plugin.FeatherJumpActive = false;
+            }
+
             if (Input.GetKey(KeyCode.Z) && Plugin.HasAnyActiveRitual(__instance))
             {
                 _holdTime += Time.deltaTime;
@@ -7023,7 +7081,7 @@ namespace EnvReporter
             Beds     = new BedsConfig     { SleepWithoutSpawn = true },
             Cache    = new CacheConfig    { Enabled = true, WeightContents = true },
             Carts    = new CartsConfig    { Enabled = true },
-            Ships    = new ShipsConfig    { Enabled = true, NoDamageFilter = true, NoDamageRadius = 30f },
+            Ships    = new ShipsConfig    { Enabled = true, NoDamageFilter = true, NoDamageRadius = 10f },
             Rituals  = new RitualsConfig
             {
                 Enabled  = true,
@@ -7062,6 +7120,7 @@ namespace EnvReporter
                     ["tar_moat"]      = new RitualItemConfig { Enabled = false, Item = "Obsidian",     HoverText = "Raise a tar moat",           Message = "The earth bleeds black. None shall cross.",        Duration = 60f,       Domain = "Blessings" },
                     ["fire_wall"]     = new RitualItemConfig { Enabled = true, Item = "Ruby",          HoverText = "Ignite the structure",        Message = "The structure burns. None shall pass.",             Duration = 60f,       Domain = "Blessings" },
                     ["tree_stand"]    = new RitualItemConfig { Enabled = true, Item = "FirCone",       HoverText = "Raise a stand of trees",      Message = "The seeds remember the earth. Sleep, and the forest will answer.",         Domain = "Blessings" },
+                    ["prime"]         = new RitualItemConfig { Enabled = true, Item = "Entrails",      HoverText = "Call to the gods",   Message = "The offering is made. The gods will answer.", MultiplierA = 0.5f, MultiplierB = 0.25f, Domain = "Blessings" },
                     ["rock_stand"]    = new RitualItemConfig { Enabled = true, Item = "WitheredBone",  HoverText = "Raise stone",                 Message = "The bones remember stone. Sleep, and the earth will answer.",              Domain = "Blessings" },
                     ["seek_deer"]        = new RitualItemConfig { Enabled = true, Item = "DeerHide",      HoverText = "Hunt the deer",        Message = "He thinks he's alone.",                    Distance = 150f, Domain = "Navigation" },
                     ["seek_boar"]        = new RitualItemConfig { Enabled = true, Item = "LeatherScraps", HoverText = "Hunt the boar",        Message = "The boar roots nearby.",                   Distance = 150f, Domain = "Navigation" },
@@ -7113,7 +7172,7 @@ namespace EnvReporter
     {
         public bool  Enabled        { get; set; } = true;
         public bool  NoDamageFilter { get; set; } = true;
-        public float NoDamageRadius { get; set; } = 30f;
+        public float NoDamageRadius { get; set; } = 10f;
     }
 
     public class RitualsConfig
@@ -7141,7 +7200,9 @@ namespace EnvReporter
         public string Message   { get; set; } = "";
         public float  Duration   { get; set; } = 0f;
         public float  Distance   { get; set; } = 0f;
-        public float  CarryBonus { get; set; } = 0f;
-        public string Domain     { get; set; } = "Blessings";
+        public float  CarryBonus  { get; set; } = 0f;
+        public float  MultiplierA { get; set; } = 2f;
+        public float  MultiplierB { get; set; } = 2f;
+        public string Domain      { get; set; } = "Blessings";
     }
 }

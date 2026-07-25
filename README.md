@@ -39,6 +39,7 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
    - Raise a stand of trees
    - Raise stone
    - Carry great burdens
+   - Call to the gods
    - Push the mist away
    - Ignite the structure
    - Summon Dyrnwyn
