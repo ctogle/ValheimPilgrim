@@ -7,7 +7,8 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
 3. Cart upgrades - more storage, map tracking, hand brake and quick release that don't require loving eye contact with the cart.
 4. Ship upgrades - more storage, map tracking, no damage without nearby player.
 5. Pilgrim's Cache - portable, upgradeable storage for a little bit of anything.
-6. Fire offering rituals:
+6. Instant weapon swap while sprinting or blocking.
+7. Fire offering rituals:
    - Seek the next altar
    - Seek your bed
    - Seek a merchant
