@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.3")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.4")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -3934,48 +3934,49 @@ namespace EnvReporter
         static void Postfix(Player __instance, bool sleep)
         {
             if (!sleep || __instance != Player.m_localPlayer) return;
-            if (!Plugin.GrowthBlessingActive) return;
-            Plugin.GrowthBlessingActive = false;
 
-            int count = 0;
             const float radius = 50f;
             var pos = __instance.transform.position;
-            foreach (var plant in UnityEngine.Object.FindObjectsOfType<Plant>())
+
+            if (Plugin.GrowthBlessingActive)
             {
-                if (Vector3.Distance(plant.transform.position, pos) > radius) continue;
-                var nview = plant.GetComponent<ZNetView>();
-                if (nview == null || !nview.IsValid() || !nview.IsOwner()) continue;
-                // Backdate plant time far enough to exceed m_growTimeMax
-                long ancientTicks = (ZNet.instance.GetTime() - System.TimeSpan.FromSeconds(10000)).Ticks;
-                nview.GetZDO().Set(ZDOVars.s_plantTime, ancientTicks);
-                plant.Grow();
-                count++;
+                Plugin.GrowthBlessingActive = false;
+                int count = 0;
+                foreach (var plant in UnityEngine.Object.FindObjectsOfType<Plant>())
+                {
+                    if (Vector3.Distance(plant.transform.position, pos) > radius) continue;
+                    var nview = plant.GetComponent<ZNetView>();
+                    if (nview == null || !nview.IsValid() || !nview.IsOwner()) continue;
+                    long ancientTicks = (ZNet.instance.GetTime() - System.TimeSpan.FromSeconds(10000)).Ticks;
+                    nview.GetZDO().Set(ZDOVars.s_plantTime, ancientTicks);
+                    plant.Grow();
+                    count++;
+                }
+                if (count > 0)
+                    __instance.Message(MessageHud.MessageType.TopLeft, $"{count} crops answered the blessing.");
             }
 
-            if (count > 0)
-                __instance.Message(MessageHud.MessageType.TopLeft, $"{count} crops answered the blessing.");
-
-            // Tame blessing
-            if (!Plugin.TameBlessingActive) return;
-            Plugin.TameBlessingActive = false;
-            int tameCount = 0;
-            foreach (var tameable in UnityEngine.Object.FindObjectsOfType<Tameable>())
+            if (Plugin.TameBlessingActive)
             {
-                if (Vector3.Distance(tameable.transform.position, pos) > radius) continue;
-                var nview2 = tameable.GetComponent<ZNetView>();
-                if (nview2 == null || !nview2.IsValid() || !nview2.IsOwner()) continue;
-                float tame = nview2.GetZDO().GetFloat(ZDOVars.s_tameTimeLeft, -1f);
-                // Only tame creatures already started (tameTimeLeft has been set = tameness > 0)
-                if (tame < 0f) continue;
-                var ch = tameable.GetComponent<Character>();
-                if (ch != null) ch.SetTamed(true);
-                tameCount++;
+                Plugin.TameBlessingActive = false;
+                int tameCount = 0;
+                foreach (var tameable in UnityEngine.Object.FindObjectsOfType<Tameable>())
+                {
+                    if (Vector3.Distance(tameable.transform.position, pos) > radius) continue;
+                    var nview2 = tameable.GetComponent<ZNetView>();
+                    if (nview2 == null || !nview2.IsValid() || !nview2.IsOwner()) continue;
+                    float tame = nview2.GetZDO().GetFloat(ZDOVars.s_tameTimeLeft, -1f);
+                    if (tame < 0f) continue;
+                    var ch = tameable.GetComponent<Character>();
+                    if (ch != null) ch.SetTamed(true);
+                    tameCount++;
+                }
+                if (tameCount > 0)
+                    __instance.Message(MessageHud.MessageType.TopLeft, $"{tameCount} creatures answered the bond.");
             }
-            if (tameCount > 0)
-                __instance.Message(MessageHud.MessageType.TopLeft, $"{tameCount} creatures answered the bond.");
 
-            // Mead blessing
-            if (!Plugin.MeadBlessingActive) return;
+            if (Plugin.MeadBlessingActive)
+            {
             Plugin.MeadBlessingActive = false;
             int meadCount = 0;
             foreach (var fermenter in UnityEngine.Object.FindObjectsOfType<Fermenter>())
@@ -3997,6 +3998,7 @@ namespace EnvReporter
             }
             if (meadCount > 0)
                 __instance.Message(MessageHud.MessageType.TopLeft, $"{meadCount} fermenters answered the blessing.");
+            }
         }
     }
 
@@ -6174,11 +6176,15 @@ namespace EnvReporter
             while (bird != null && elapsed < 200f / speed)
             {
                 elapsed += Time.deltaTime;
-                var right2 = Vector3.Cross(Vector3.up, dir).normalized;
+                var right2 = Vector3.Cross(Vector3.up, dir);
+                if (right2.sqrMagnitude < 0.001f) right2 = Vector3.right;
+                else right2.Normalize();
                 Vector3 wobble = right2 * Mathf.Sin(elapsed * 1.3f + wobbleOffset) * 0.4f
                                + Vector3.up * Mathf.Sin(elapsed * 0.9f + wobbleOffset + 1f) * 0.2f;
                 bird.transform.position += (dir + wobble) * speed * Time.deltaTime;
-                bird.transform.rotation = Quaternion.LookRotation(dir + wobble * 0.5f);
+                var lookDir = dir + wobble * 0.5f;
+                if (lookDir.sqrMagnitude > 0.001f)
+                    bird.transform.rotation = Quaternion.LookRotation(lookDir);
                 yield return null;
             }
             if (bird != null)
@@ -6247,11 +6253,15 @@ namespace EnvReporter
             {
                 elapsed += Time.deltaTime;
                 // Gentle sine wobble perpendicular to flight
-                var right2 = Vector3.Cross(Vector3.up, dir).normalized;
+                var right2 = Vector3.Cross(Vector3.up, dir);
+                if (right2.sqrMagnitude < 0.001f) right2 = Vector3.right;
+                else right2.Normalize();
                 Vector3 wobble = right2 * Mathf.Sin(elapsed * 1.3f + wobbleOffset) * 0.4f
                                + Vector3.up * Mathf.Sin(elapsed * 0.9f + wobbleOffset + 1f) * 0.2f;
                 bird.transform.position += (dir + wobble) * speed * Time.deltaTime;
-                bird.transform.rotation = Quaternion.LookRotation(dir + wobble * 0.5f);
+                var lookDir = dir + wobble * 0.5f;
+                if (lookDir.sqrMagnitude > 0.001f)
+                    bird.transform.rotation = Quaternion.LookRotation(lookDir);
                 yield return null;
             }
 
@@ -7064,24 +7074,48 @@ namespace EnvReporter
         }
     }
 
+    [HarmonyPatch(typeof(Player), "ToggleEquipped")]
+    static class InstantEquipWhileMovingPatch
+    {
+        static bool Prefix(Player __instance, ItemDrop.ItemData item, ref bool __result)
+        {
+            if (!Plugin.Cfg.Equipment.InstantEquipWhileMoving) return true;
+            if (!item.IsEquipable()) return true;
+            if (__instance.InAttack()) { __result = true; return false; }
+            var t = Traverse.Create(__instance);
+            bool run      = t.Field<bool>("m_run").Value;
+            bool blocking = t.Field<bool>("m_blocking").Value;
+            if (!run && !blocking) return true;
+
+            if (__instance.IsItemEquiped(item))
+                __instance.UnequipItem(item);
+            else
+                __instance.EquipItem(item);
+            __result = true;
+            return false;
+        }
+    }
+
     // ── Config classes ───────────────────────────────────────────────────────
 
     public class PilgrimConfig
     {
-        public TrophiesConfig  Trophies { get; set; } = new TrophiesConfig();
-        public BedsConfig      Beds     { get; set; } = new BedsConfig();
-        public CacheConfig     Cache    { get; set; } = new CacheConfig();
-        public CartsConfig     Carts    { get; set; } = new CartsConfig();
-        public ShipsConfig     Ships    { get; set; } = new ShipsConfig();
-        public RitualsConfig   Rituals  { get; set; } = new RitualsConfig();
+        public TrophiesConfig   Trophies  { get; set; } = new TrophiesConfig();
+        public BedsConfig       Beds      { get; set; } = new BedsConfig();
+        public CacheConfig      Cache     { get; set; } = new CacheConfig();
+        public CartsConfig      Carts     { get; set; } = new CartsConfig();
+        public ShipsConfig      Ships     { get; set; } = new ShipsConfig();
+        public EquipmentConfig  Equipment { get; set; } = new EquipmentConfig();
+        public RitualsConfig    Rituals   { get; set; } = new RitualsConfig();
 
         public static PilgrimConfig Default() => new PilgrimConfig
         {
             Trophies = new TrophiesConfig { Enabled = true, Vfx = "fx_fireskeleton_nova" },
             Beds     = new BedsConfig     { SleepWithoutSpawn = true },
             Cache    = new CacheConfig    { Enabled = true, WeightContents = true },
-            Carts    = new CartsConfig    { Enabled = true },
-            Ships    = new ShipsConfig    { Enabled = true, NoDamageFilter = true, NoDamageRadius = 10f },
+            Carts     = new CartsConfig     { Enabled = true },
+            Ships     = new ShipsConfig     { Enabled = true, NoDamageFilter = true, NoDamageRadius = 10f },
+            Equipment = new EquipmentConfig { InstantEquipWhileMoving = true },
             Rituals  = new RitualsConfig
             {
                 Enabled  = true,
@@ -7161,6 +7195,11 @@ namespace EnvReporter
     public class CartsConfig
     {
         public bool Enabled { get; set; } = true;
+    }
+
+    public class EquipmentConfig
+    {
+        public bool InstantEquipWhileMoving { get; set; } = true;
     }
 
     public class BedsConfig
