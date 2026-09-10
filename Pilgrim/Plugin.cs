@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.4")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.5")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -257,7 +257,7 @@ namespace EnvReporter
                     int    gy    = Mathf.Clamp(pkg.ReadInt(), 0, rows - 1);
                     if (!string.IsNullOrEmpty(name) && stack > 0)
                     {
-                        var added = inv.AddItem(name, stack, qual, 0, 0L, "");
+                        var added = inv.AddItem(name, stack, qual, 0, 0L, "", false);
                         if (added != null) added.m_gridPos = new Vector2i(gx, gy);
                     }
                 }
@@ -744,8 +744,14 @@ namespace EnvReporter
                 EnableRaisingEvents = true,
             };
             _cfgWatcher.Changed += (_, __) => _cfgDirty = true;
-            try { new Harmony("com.ctogle.pilgrim").PatchAll(); }
-            catch (System.Exception ex) { Log.LogError($"[Pilgrim] Harmony patch failed: {ex.Message}"); }
+            // Patch per-class so one broken patch (e.g. an API changed by a game update) doesn't
+            // abort all the others; log each failure individually.
+            var harmony = new Harmony("com.ctogle.pilgrim");
+            foreach (var patchType in System.Reflection.Assembly.GetExecutingAssembly().GetTypes())
+            {
+                try { harmony.CreateClassProcessor(patchType).Patch(); }
+                catch (System.Exception ex) { Log.LogError($"[Pilgrim] patch failed for {patchType.Name}: {ex.Message}"); }
+            }
             RegisterCommands();
             var go = new GameObject("AthScheduler");
             DontDestroyOnLoad(go);
@@ -1047,7 +1053,7 @@ namespace EnvReporter
                         ? (Plugin.Cfg.Rituals.Items.TryGetValue(key, out var rc) ? rc.Item.TrimEnd('*') : match)
                         : match;
                     if (!seen.Add(prefabName)) continue;
-                    var added = player.GetInventory().AddItem(prefabName, 1, 1, 0, 0L, "");
+                    var added = player.GetInventory().AddItem(prefabName, 1, 1, 0, 0L, "", false);
                     if (added != null) spawned++;
                     else skipped++;
                 }
@@ -1547,7 +1553,7 @@ namespace EnvReporter
             {
                 if (ingredient != null)
                 {
-                    player.GetInventory().AddItem(ingredient, 1, 1, 0, 0, "");
+                    player.GetInventory().AddItem(ingredient, 1, 1, 0, 0, "", false);
                     RitualCooldownRemaining = 0f;
                 }
                 player.Message(MessageHud.MessageType.Center, $"Seeking {bossName} — altar not yet revealed.");
@@ -3068,7 +3074,7 @@ namespace EnvReporter
                 player.GetInventory().RemoveItem(currentRight);
             }
 
-            var newItem = player.GetInventory().AddItem(def.Prefab, 1, 1, 0, 0L, "");
+            var newItem = player.GetInventory().AddItem(def.Prefab, 1, 1, 0, 0L, "", false);
             if (newItem == null)
             {
                 player.Message(MessageHud.MessageType.Center, "No room in your pack.");
@@ -4152,8 +4158,9 @@ namespace EnvReporter
             if (hold || !alt) return true;
             if (!__instance.HaveAttachment()) return true;
 
-            // GetAttachedItem returns the item prefab name as a string
-            string prefab = __instance.GetAttachedItem() ?? "";
+            // 1.0: GetAttachedItem returns the prefab-name stable hash (int); resolve to name.
+            int attachHash = __instance.GetAttachedItem();
+            string prefab = attachHash != 0 ? (ZNetScene.instance?.GetPrefab(attachHash)?.name ?? "") : "";
             // Debug: always print what we see so we can fix the lookup key
             Console.instance?.AddString($"[EnvR] ItemStand attached='{prefab}' hasAttach={__instance.HaveAttachment()}");
             if (string.IsNullOrEmpty(prefab)) return true;
@@ -4632,7 +4639,8 @@ namespace EnvReporter
         {
             if (Plugin.Cfg.Trophies.Enabled && __instance.HaveAttachment())
             {
-                string prefab = __instance.GetAttachedItem() ?? "";
+                int attachHash = __instance.GetAttachedItem();
+                string prefab = attachHash != 0 ? (ZNetScene.instance?.GetPrefab(attachHash)?.name ?? "") : "";
                 if (Plugin.TrophyToPower.ContainsKey(prefab) &&
                     !__result.Contains("Shift+E"))
                     __result += "\n[<color=yellow>Shift+E</color>] Claim Forsaken Power";
@@ -4643,7 +4651,7 @@ namespace EnvReporter
 
     // ── Water walk: keep attached cart at water surface ─────────────────────
 
-    [HarmonyPatch(typeof(Vagon), "FixedUpdate")]
+    [HarmonyPatch(typeof(Vagon), "Update")]   // 1.0 removed Vagon.FixedUpdate; Update is the per-frame tick
     static class VagonFixedUpdatePatch
     {
         static readonly BindingFlags RF = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
@@ -4725,7 +4733,7 @@ namespace EnvReporter
             }
 
             // Minimap pin — update every 2s to avoid per-frame overhead
-            _pinUpdateTimer -= Time.fixedDeltaTime;
+            _pinUpdateTimer -= Time.deltaTime;
             if (_pinUpdateTimer > 0f) return;
             _pinUpdateTimer = 2f;
             EnsurePin(__instance);
@@ -4981,7 +4989,7 @@ namespace EnvReporter
         }
     }
 
-    [HarmonyPatch(typeof(Inventory), "Load")]
+    [HarmonyPatch(typeof(Inventory), "Load", new[] { typeof(ZPackage) })]  // 1.0 added a Load(ZPackage,bool) overload
     static class InventoryLoadPatch
     {
         static readonly BindingFlags _rf = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
@@ -5438,7 +5446,7 @@ namespace EnvReporter
                     {
                         int.TryParse(origLevelStr, out int origLevel);
                         if (origLevel < 1) origLevel = 1;
-                        var restored = inv.AddItem(origPrefab, 1, origLevel, 0, 0L, "");
+                        var restored = inv.AddItem(origPrefab, 1, origLevel, 0, 0L, "", false);
                         if (restored != null) __instance.EquipItem(restored);
                         Plugin.Log.LogInfo($"[Pilgrim] Restored original weapon {origPrefab} q{origLevel}");
                     }
@@ -6990,18 +6998,18 @@ namespace EnvReporter
     }
     } // end CrateFilter
 
-    // Drag-and-drop path: AddItem(item, amount, x, y)
+    // Drag-and-drop path: 1.0 replaced AddItem(item, amount, x, y) with AddItem(item, Vector2i pos)
     [HarmonyPatch(typeof(Inventory), "AddItem",
-        new System.Type[] { typeof(ItemDrop.ItemData), typeof(int), typeof(int), typeof(int) })]
+        new System.Type[] { typeof(ItemDrop.ItemData), typeof(Vector2i) })]
     static class CrateAddItemPatch
     {
-        static bool Prefix(Inventory __instance, ItemDrop.ItemData item, int amount, int x, int y,
+        static bool Prefix(Inventory __instance, ItemDrop.ItemData item, Vector2i pos,
                            ref bool __result)
         {
             if (__instance != Plugin._crateInventory) return true;
             // Internal cache rearrange — item already belongs to this inventory, skip filter
             if (__instance.ContainsItem(item)) return true;
-            if (CrateFilter.Allow(__instance, item, x, y)) return true;
+            if (CrateFilter.Allow(__instance, item, pos.x, pos.y)) return true;
             __result = false;
             return false;
         }

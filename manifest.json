@@ -1,10 +1,10 @@
 {
   "name": "Pilgrim",
-  "version_number": "0.5.3",
+  "version_number": "0.5.5",
   "website_url": "https://github.com/ctogle/ValheimPilgrim",
   "description": "Pilgrim introduces new mechanics that make it easier to avoid backtracking.",
   "dependencies": [
-    "denikson-BepInExPack_Valheim-5.4.2202",
+    "denikson-BepInExPack_Valheim-5.4.2333",
     "ValheimModding-YamlDotNet-16.3.1"
   ]
 }
