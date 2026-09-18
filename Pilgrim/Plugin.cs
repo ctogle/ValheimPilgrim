@@ -414,15 +414,30 @@ namespace EnvReporter
             var inv = new Inventory("Pilgrim's Cache", null, cols, rows);
             DeserializeCrate(inv, ReadCrate(player, item));
 
-            // Create a local-only Container (no ZNetView) — Awake suppressed via flag
+            // Create a local-only Container — Awake suppressed via flag
             if (_fakeCrateGo != null) Object.Destroy(_fakeCrateGo);
             _fakeCrateGo = new GameObject("PilgrimCrateContainer");
             _fakeCrateGo.AddComponent<PilgrimCrateMarker>();
             _fakeCrateGo.transform.position = player.transform.position;
             Object.DontDestroyOnLoad(_fakeCrateGo);
+
+            // Attach a ZNetView with Awake suppressed (never creates a ZDO, never
+            // registers on the network). Both vanilla Container.SetInUse and
+            // AzuAutoStore's SetInUse prefix call m_nview.IsOwner() unguarded — with
+            // a null m_nview that NREs on every open/close. A ZNetView with a null
+            // ZDO makes IsOwner() return false safely instead of throwing.
+            _suppressZNetViewAwake = true;
+            var fakeNview = _fakeCrateGo.AddComponent<ZNetView>();
+            _suppressZNetViewAwake = false;
+
             _suppressContainerAwake = true;
             _fakeCrateContainer = _fakeCrateGo.AddComponent<Container>();
             _suppressContainerAwake = false;
+
+            // Awake was suppressed, so wire the container's m_nview manually
+            typeof(Container)
+                .GetField("m_nview", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?.SetValue(_fakeCrateContainer, fakeNview);
 
             // Awake was suppressed, so set m_inventory manually
             typeof(Container)
@@ -787,7 +802,10 @@ namespace EnvReporter
             var go = UnityEngine.Object.Instantiate(prefab, pos, rot);
             prefab.SetActive(true);
             // Destroy all components that call GetComponent<ZNetView> in Awake before activating.
-            string[] netTypes = { "ZNetView", "ZSyncTransform", "ZSyncAnimation", "ZSFX", "TimedDestruction" };
+            // NOTE: ZSFX is intentionally NOT stripped — it drives the sound (m_playOnAwake) and
+            // does not touch ZNetView in Awake; its only ZNetView use (IsPlayerCreator) is null-safe
+            // and defaults to "play" when no nview is present. Stripping it silenced ritual VFX.
+            string[] netTypes = { "ZNetView", "ZSyncTransform", "ZSyncAnimation", "TimedDestruction" };
             foreach (var mb in go.GetComponentsInChildren<MonoBehaviour>(true))
                 if (mb != null && System.Array.IndexOf(netTypes, mb.GetType().Name) >= 0)
                     UnityEngine.Object.DestroyImmediate(mb);
