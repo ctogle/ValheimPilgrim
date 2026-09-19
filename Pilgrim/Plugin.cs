@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.6")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.7")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -7145,6 +7145,23 @@ namespace EnvReporter
         }
     }
 
+    // Scale the local player's hammer reach. Place, remove, and copy-piece all gate on
+    // Player.m_maxPlaceDistance (vanilla 5m), so one field covers all three. Applied each
+    // frame from a captured vanilla base so it stays live-configurable and never compounds.
+    [HarmonyPatch(typeof(Player), "UpdatePlacement")]
+    static class HammerReachPatch
+    {
+        static float _baseReach = -1f;
+        static void Prefix(Player __instance)
+        {
+            if (__instance != Player.m_localPlayer) return;
+            if (_baseReach < 0f) _baseReach = __instance.m_maxPlaceDistance; // capture vanilla default once
+            float mult = Plugin.Cfg.Build.ReachMultiplier;
+            if (mult <= 0f) mult = 1f;
+            __instance.m_maxPlaceDistance = Plugin.Cfg.Build.Enabled ? _baseReach * mult : _baseReach;
+        }
+    }
+
     // ── Config classes ───────────────────────────────────────────────────────
 
     public class PilgrimConfig
@@ -7155,6 +7172,7 @@ namespace EnvReporter
         public CartsConfig      Carts     { get; set; } = new CartsConfig();
         public ShipsConfig      Ships     { get; set; } = new ShipsConfig();
         public EquipmentConfig  Equipment { get; set; } = new EquipmentConfig();
+        public BuildConfig      Build     { get; set; } = new BuildConfig();
         public RitualsConfig    Rituals   { get; set; } = new RitualsConfig();
 
         public static PilgrimConfig Default() => new PilgrimConfig
@@ -7165,6 +7183,7 @@ namespace EnvReporter
             Carts     = new CartsConfig     { Enabled = true },
             Ships     = new ShipsConfig     { Enabled = true, NoDamageFilter = true, NoDamageRadius = 10f },
             Equipment = new EquipmentConfig { InstantEquipWhileMoving = true },
+            Build     = new BuildConfig     { Enabled = true, ReachMultiplier = 4f },
             Rituals  = new RitualsConfig
             {
                 Enabled  = true,
@@ -7252,6 +7271,13 @@ namespace EnvReporter
     public class EquipmentConfig
     {
         public bool InstantEquipWhileMoving { get; set; } = true;
+    }
+
+    public class BuildConfig
+    {
+        public bool  Enabled         { get; set; } = true;
+        // Scales the vanilla hammer reach (5m) for placing, removing, and copying pieces.
+        public float ReachMultiplier { get; set; } = 4f;
     }
 
     public class BedsConfig

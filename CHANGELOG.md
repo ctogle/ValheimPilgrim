@@ -21,3 +21,4 @@
 | 0.5.4   | Instant weapon swap while sprinting or blocking (configurable); fix mead/tame sleep blessings blocked when crops blessing inactive |
 | 0.5.5   | Valheim 1.0 compatibility |
 | 0.5.6   | Fix Pilgrim's Cache close NullRef (nview/AzuAutoStore); restore ritual VFX sound; all keybinds configurable (cart release now Q); co-op fix — crop/tame/repair blessings affect objects owned by other players |
+| 0.5.7   | Extended hammer reach — configurable multiplier (default 4×) for placing, removing, and copying build pieces |

@@ -8,7 +8,8 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
 4. Ship upgrades - more storage, map tracking, no damage without nearby player.
 5. Pilgrim's Cache - portable, upgradeable storage for a little bit of anything.
 6. Instant weapon swap while sprinting or blocking.
-7. Fire offering rituals:
+7. Extended hammer reach - configurable multiplier for placing, removing, and copying build pieces.
+8. Fire offering rituals:
    - Seek the next altar
    - Seek your bed
    - Seek a merchant
