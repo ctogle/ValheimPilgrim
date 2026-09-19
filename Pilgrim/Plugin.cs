@@ -2456,7 +2456,10 @@ namespace EnvReporter
             foreach (var wnt in pieces)
             {
                 var zv = wnt.GetComponent<ZNetView>();
-                if (zv == null || !zv.IsValid() || !zv.IsOwner()) continue;
+                if (zv == null || !zv.IsValid()) continue;
+                // Claim ownership first — in co-op, pieces built by other players aren't owned by
+                // the caster, and Repair() writes health to the ZDO which requires ownership.
+                zv.ClaimOwnership();
                 if (wnt.Repair()) count++;
             }
             player.Message(MessageHud.MessageType.Center, $"{message} ({count}/{pieces.Count} pieces)");
@@ -3982,7 +3985,10 @@ namespace EnvReporter
                 {
                     if (Vector3.Distance(plant.transform.position, pos) > radius) continue;
                     var nview = plant.GetComponent<ZNetView>();
-                    if (nview == null || !nview.IsValid() || !nview.IsOwner()) continue;
+                    if (nview == null || !nview.IsValid()) continue;
+                    // Claim ownership first — in co-op, crops planted by other players aren't
+                    // owned by the sleeper, and Grow() (ZDO write + prefab swap) requires ownership.
+                    nview.ClaimOwnership();
                     long ancientTicks = (ZNet.instance.GetTime() - System.TimeSpan.FromSeconds(10000)).Ticks;
                     nview.GetZDO().Set(ZDOVars.s_plantTime, ancientTicks);
                     plant.Grow();
@@ -4000,9 +4006,13 @@ namespace EnvReporter
                 {
                     if (Vector3.Distance(tameable.transform.position, pos) > radius) continue;
                     var nview2 = tameable.GetComponent<ZNetView>();
-                    if (nview2 == null || !nview2.IsValid() || !nview2.IsOwner()) continue;
+                    if (nview2 == null || !nview2.IsValid()) continue;
+                    // Read (replicated to all clients) before claiming: only affect in-progress taming.
                     float tame = nview2.GetZDO().GetFloat(ZDOVars.s_tameTimeLeft, -1f);
                     if (tame < 0f) continue;
+                    // Claim ownership first — creatures tamed by other players aren't owned by the
+                    // sleeper, and SetTamed writes to the ZDO which requires ownership.
+                    nview2.ClaimOwnership();
                     var ch = tameable.GetComponent<Character>();
                     if (ch != null) ch.SetTamed(true);
                     tameCount++;
