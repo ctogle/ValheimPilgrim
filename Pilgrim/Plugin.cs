@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.5")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.6")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
