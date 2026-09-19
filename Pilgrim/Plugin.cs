@@ -11,7 +11,7 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.5")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.6")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -27,6 +27,18 @@ namespace EnvReporter
 
         // ── Config ──────────────────────────────────────────────────────────
         internal static PilgrimConfig Cfg = PilgrimConfig.Default();
+
+        // Parse a KeyCode name from config, falling back if empty/invalid.
+        internal static KeyCode ParseKey(string name, KeyCode fallback) =>
+            System.Enum.TryParse<KeyCode>(name, ignoreCase: true, out var k) ? k : fallback;
+
+        // Configured keybinds (all overridable via YAML; defaults chosen to avoid overloading).
+        internal static KeyCode CartReleaseKey  => ParseKey(Cfg.Carts.ReleaseKey,        KeyCode.Q);
+        internal static KeyCode CartBrakeKey    => ParseKey(Cfg.Carts.BrakeKey,          KeyCode.B);
+        internal static KeyCode RelinquishKey   => ParseKey(Cfg.Rituals.RelinquishKey,   KeyCode.Z);
+        internal static KeyCode HintToggleKey   => ParseKey(Cfg.Rituals.HintToggleKey,   KeyCode.H);
+        internal static KeyCode HintPageKey     => ParseKey(Cfg.Rituals.HintPageKey,     KeyCode.R);
+
         static bool _cfgDirty = false;
         static FileSystemWatcher? _cfgWatcher;
 
@@ -414,15 +426,30 @@ namespace EnvReporter
             var inv = new Inventory("Pilgrim's Cache", null, cols, rows);
             DeserializeCrate(inv, ReadCrate(player, item));
 
-            // Create a local-only Container (no ZNetView) — Awake suppressed via flag
+            // Create a local-only Container — Awake suppressed via flag
             if (_fakeCrateGo != null) Object.Destroy(_fakeCrateGo);
             _fakeCrateGo = new GameObject("PilgrimCrateContainer");
             _fakeCrateGo.AddComponent<PilgrimCrateMarker>();
             _fakeCrateGo.transform.position = player.transform.position;
             Object.DontDestroyOnLoad(_fakeCrateGo);
+
+            // Attach a ZNetView with Awake suppressed (never creates a ZDO, never
+            // registers on the network). Both vanilla Container.SetInUse and
+            // AzuAutoStore's SetInUse prefix call m_nview.IsOwner() unguarded — with
+            // a null m_nview that NREs on every open/close. A ZNetView with a null
+            // ZDO makes IsOwner() return false safely instead of throwing.
+            _suppressZNetViewAwake = true;
+            var fakeNview = _fakeCrateGo.AddComponent<ZNetView>();
+            _suppressZNetViewAwake = false;
+
             _suppressContainerAwake = true;
             _fakeCrateContainer = _fakeCrateGo.AddComponent<Container>();
             _suppressContainerAwake = false;
+
+            // Awake was suppressed, so wire the container's m_nview manually
+            typeof(Container)
+                .GetField("m_nview", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?.SetValue(_fakeCrateContainer, fakeNview);
 
             // Awake was suppressed, so set m_inventory manually
             typeof(Container)
@@ -787,7 +814,10 @@ namespace EnvReporter
             var go = UnityEngine.Object.Instantiate(prefab, pos, rot);
             prefab.SetActive(true);
             // Destroy all components that call GetComponent<ZNetView> in Awake before activating.
-            string[] netTypes = { "ZNetView", "ZSyncTransform", "ZSyncAnimation", "ZSFX", "TimedDestruction" };
+            // NOTE: ZSFX is intentionally NOT stripped — it drives the sound (m_playOnAwake) and
+            // does not touch ZNetView in Awake; its only ZNetView use (IsPlayerCreator) is null-safe
+            // and defaults to "play" when no nview is present. Stripping it silenced ritual VFX.
+            string[] netTypes = { "ZNetView", "ZSyncTransform", "ZSyncAnimation", "TimedDestruction" };
             foreach (var mb in go.GetComponentsInChildren<MonoBehaviour>(true))
                 if (mb != null && System.Array.IndexOf(netTypes, mb.GetType().Name) >= 0)
                     UnityEngine.Object.DestroyImmediate(mb);
@@ -2426,7 +2456,10 @@ namespace EnvReporter
             foreach (var wnt in pieces)
             {
                 var zv = wnt.GetComponent<ZNetView>();
-                if (zv == null || !zv.IsValid() || !zv.IsOwner()) continue;
+                if (zv == null || !zv.IsValid()) continue;
+                // Claim ownership first — in co-op, pieces built by other players aren't owned by
+                // the caster, and Repair() writes health to the ZDO which requires ownership.
+                zv.ClaimOwnership();
                 if (wnt.Repair()) count++;
             }
             player.Message(MessageHud.MessageType.Center, $"{message} ({count}/{pieces.Count} pieces)");
@@ -3952,7 +3985,10 @@ namespace EnvReporter
                 {
                     if (Vector3.Distance(plant.transform.position, pos) > radius) continue;
                     var nview = plant.GetComponent<ZNetView>();
-                    if (nview == null || !nview.IsValid() || !nview.IsOwner()) continue;
+                    if (nview == null || !nview.IsValid()) continue;
+                    // Claim ownership first — in co-op, crops planted by other players aren't
+                    // owned by the sleeper, and Grow() (ZDO write + prefab swap) requires ownership.
+                    nview.ClaimOwnership();
                     long ancientTicks = (ZNet.instance.GetTime() - System.TimeSpan.FromSeconds(10000)).Ticks;
                     nview.GetZDO().Set(ZDOVars.s_plantTime, ancientTicks);
                     plant.Grow();
@@ -3970,9 +4006,13 @@ namespace EnvReporter
                 {
                     if (Vector3.Distance(tameable.transform.position, pos) > radius) continue;
                     var nview2 = tameable.GetComponent<ZNetView>();
-                    if (nview2 == null || !nview2.IsValid() || !nview2.IsOwner()) continue;
+                    if (nview2 == null || !nview2.IsValid()) continue;
+                    // Read (replicated to all clients) before claiming: only affect in-progress taming.
                     float tame = nview2.GetZDO().GetFloat(ZDOVars.s_tameTimeLeft, -1f);
                     if (tame < 0f) continue;
+                    // Claim ownership first — creatures tamed by other players aren't owned by the
+                    // sleeper, and SetTamed writes to the ZDO which requires ownership.
+                    nview2.ClaimOwnership();
                     var ch = tameable.GetComponent<Character>();
                     if (ch != null) ch.SetTamed(true);
                     tameCount++;
@@ -4610,22 +4650,23 @@ namespace EnvReporter
             int slots = CartUpgrade.BaseWidth * CartUpgrade.Heights[Mathf.Clamp(level, 0, CartUpgrade.Heights.Length - 1)];
 
             bool braked = nview?.GetZDO()?.GetBool("ath_cart_brake") ?? false;
-            string brakeLabel = braked ? "[<color=yellow>B</color>] <color=orange>Handbrake ON</color>" : "[<color=yellow>B</color>] Handbrake";
+            string brakeLabel = braked ? $"[<color=yellow>{Plugin.CartBrakeKey}</color>] <color=orange>Handbrake ON</color>" : $"[<color=yellow>{Plugin.CartBrakeKey}</color>] Handbrake";
 
+            // Level-specific line: reinforced carts show status, upgradeable carts show the cost.
             if (level >= CartUpgrade.Heights.Length - 1)
             {
                 __result += $"\n<color=grey>Cart fully reinforced</color>";
-                __result += $"\n{brakeLabel}";
-                __result += $"\n[<color=yellow>G</color>] Release cart";
-                return;
+            }
+            else
+            {
+                __result += $"\n[<color=yellow>Shift+E</color>] Reinforce cart";
+                foreach (var (item, amount) in CartUpgrade.Costs[level])
+                    __result += $"\n  {amount}x {CartUpgrade.DisplayName(item)}";
             }
 
-            var cost = CartUpgrade.Costs[level];
-            __result += $"\n[<color=yellow>Shift+E</color>] Reinforce cart";
-            foreach (var (item, amount) in cost)
-                __result += $"\n  {amount}x {CartUpgrade.DisplayName(item)}";
+            // Shared footer — applies to every cart regardless of level.
             __result += $"\n{brakeLabel}";
-            __result += $"\n[<color=yellow>G</color>] Release cart";
+            __result += $"\n[<color=yellow>{Plugin.CartReleaseKey}</color>] Release cart";
         }
     }
 
@@ -5550,7 +5591,7 @@ namespace EnvReporter
                 Plugin.FeatherJumpActive = false;
             }
 
-            if (Input.GetKey(KeyCode.Z) && Plugin.HasAnyActiveRitual(__instance))
+            if (Input.GetKey(Plugin.RelinquishKey) && Plugin.HasAnyActiveRitual(__instance))
             {
                 _holdTime += Time.deltaTime;
                 int secondsLeft = Mathf.CeilToInt(3f - _holdTime);
@@ -5585,8 +5626,8 @@ namespace EnvReporter
         {
             if (__instance != Player.m_localPlayer) return;
             if (!Plugin.Cfg.Rituals.Enabled) return;
-            bool h = Input.GetKeyDown(KeyCode.H);
-            bool r = Input.GetKeyDown(KeyCode.R);
+            bool h = Input.GetKeyDown(Plugin.HintToggleKey);
+            bool r = Input.GetKeyDown(Plugin.HintPageKey);
             if (!h && !r) return;
 
             var hoverObj = __instance.GetHoverObject();
@@ -6023,8 +6064,8 @@ namespace EnvReporter
             var player = Player.m_localPlayer;
             if (player == null) return;
 
-            // G key: instant cart release
-            if (Input.GetKeyDown(KeyCode.G))
+            // Configurable key: instant cart release
+            if (Input.GetKeyDown(Plugin.CartReleaseKey))
             {
                 // Find any nearby Vagon (cart drags behind player so check generous range)
                 Vagon? wagon = null;
@@ -6042,12 +6083,12 @@ namespace EnvReporter
                 }
                 else
                 {
-                    player.Message(MessageHud.MessageType.TopLeft, "[G] No cart nearby.");
+                    player.Message(MessageHud.MessageType.TopLeft, $"[{Plugin.CartReleaseKey}] No cart nearby.");
                 }
             }
 
-            // X key: toggle cart handbrake (only while attached)
-            if (Input.GetKeyDown(KeyCode.B))
+            // Toggle cart handbrake (only while attached)
+            if (Input.GetKeyDown(Plugin.CartBrakeKey))
             {
                 Vagon? brakeTarget = null;
                 foreach (var v in Object.FindObjectsOfType<Vagon>())
@@ -7203,6 +7244,9 @@ namespace EnvReporter
     public class CartsConfig
     {
         public bool Enabled { get; set; } = true;
+        // Keys as UnityEngine.KeyCode names (e.g. "Q", "G", "Keypad0").
+        public string ReleaseKey { get; set; } = "Q";  // instant cart grab/release
+        public string BrakeKey   { get; set; } = "B";  // toggle cart handbrake
     }
 
     public class EquipmentConfig
@@ -7228,6 +7272,10 @@ namespace EnvReporter
         public float  Cooldown  { get; set; } = 60f;
         public bool   ShowHints { get; set; } = true;
         public float  ComfortPeakMultiplier { get; set; } = 4f;
+        // Keys as UnityEngine.KeyCode names.
+        public string RelinquishKey { get; set; } = "Z";  // hold to relinquish all active rituals
+        public string HintToggleKey { get; set; } = "H";  // toggle offering hints at a campfire
+        public string HintPageKey   { get; set; } = "R";  // cycle hint page
         public Dictionary<string, float> FireMultipliers { get; set; } = new Dictionary<string, float>
         {
             ["fire_pit"]      = 1.0f,

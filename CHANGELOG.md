@@ -20,3 +20,4 @@
 | 0.5.3   | Prime ritual — bless a fire days in advance; multiplier f=clamp(1+a·t+b·t²,1,5), a/b configurable; hover shows [×N] when primed; primed feather fall adds 50% jump height; ship/cart no-damage radius 10m; fix feather SE persisting after relinquish |
 | 0.5.4   | Instant weapon swap while sprinting or blocking (configurable); fix mead/tame sleep blessings blocked when crops blessing inactive |
 | 0.5.5   | Valheim 1.0 compatibility |
+| 0.5.6   | Fix Pilgrim's Cache close NullRef (nview/AzuAutoStore); restore ritual VFX sound; all keybinds configurable (cart release now Q); co-op fix — crop/tame/repair blessings affect objects owned by other players |
