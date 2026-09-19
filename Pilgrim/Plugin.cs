@@ -27,6 +27,18 @@ namespace EnvReporter
 
         // ── Config ──────────────────────────────────────────────────────────
         internal static PilgrimConfig Cfg = PilgrimConfig.Default();
+
+        // Parse a KeyCode name from config, falling back if empty/invalid.
+        internal static KeyCode ParseKey(string name, KeyCode fallback) =>
+            System.Enum.TryParse<KeyCode>(name, ignoreCase: true, out var k) ? k : fallback;
+
+        // Configured keybinds (all overridable via YAML; defaults chosen to avoid overloading).
+        internal static KeyCode CartReleaseKey  => ParseKey(Cfg.Carts.ReleaseKey,        KeyCode.Q);
+        internal static KeyCode CartBrakeKey    => ParseKey(Cfg.Carts.BrakeKey,          KeyCode.B);
+        internal static KeyCode RelinquishKey   => ParseKey(Cfg.Rituals.RelinquishKey,   KeyCode.Z);
+        internal static KeyCode HintToggleKey   => ParseKey(Cfg.Rituals.HintToggleKey,   KeyCode.H);
+        internal static KeyCode HintPageKey     => ParseKey(Cfg.Rituals.HintPageKey,     KeyCode.R);
+
         static bool _cfgDirty = false;
         static FileSystemWatcher? _cfgWatcher;
 
@@ -4628,22 +4640,23 @@ namespace EnvReporter
             int slots = CartUpgrade.BaseWidth * CartUpgrade.Heights[Mathf.Clamp(level, 0, CartUpgrade.Heights.Length - 1)];
 
             bool braked = nview?.GetZDO()?.GetBool("ath_cart_brake") ?? false;
-            string brakeLabel = braked ? "[<color=yellow>B</color>] <color=orange>Handbrake ON</color>" : "[<color=yellow>B</color>] Handbrake";
+            string brakeLabel = braked ? $"[<color=yellow>{Plugin.CartBrakeKey}</color>] <color=orange>Handbrake ON</color>" : $"[<color=yellow>{Plugin.CartBrakeKey}</color>] Handbrake";
 
+            // Level-specific line: reinforced carts show status, upgradeable carts show the cost.
             if (level >= CartUpgrade.Heights.Length - 1)
             {
                 __result += $"\n<color=grey>Cart fully reinforced</color>";
-                __result += $"\n{brakeLabel}";
-                __result += $"\n[<color=yellow>G</color>] Release cart";
-                return;
+            }
+            else
+            {
+                __result += $"\n[<color=yellow>Shift+E</color>] Reinforce cart";
+                foreach (var (item, amount) in CartUpgrade.Costs[level])
+                    __result += $"\n  {amount}x {CartUpgrade.DisplayName(item)}";
             }
 
-            var cost = CartUpgrade.Costs[level];
-            __result += $"\n[<color=yellow>Shift+E</color>] Reinforce cart";
-            foreach (var (item, amount) in cost)
-                __result += $"\n  {amount}x {CartUpgrade.DisplayName(item)}";
+            // Shared footer — applies to every cart regardless of level.
             __result += $"\n{brakeLabel}";
-            __result += $"\n[<color=yellow>G</color>] Release cart";
+            __result += $"\n[<color=yellow>{Plugin.CartReleaseKey}</color>] Release cart";
         }
     }
 
@@ -5568,7 +5581,7 @@ namespace EnvReporter
                 Plugin.FeatherJumpActive = false;
             }
 
-            if (Input.GetKey(KeyCode.Z) && Plugin.HasAnyActiveRitual(__instance))
+            if (Input.GetKey(Plugin.RelinquishKey) && Plugin.HasAnyActiveRitual(__instance))
             {
                 _holdTime += Time.deltaTime;
                 int secondsLeft = Mathf.CeilToInt(3f - _holdTime);
@@ -5603,8 +5616,8 @@ namespace EnvReporter
         {
             if (__instance != Player.m_localPlayer) return;
             if (!Plugin.Cfg.Rituals.Enabled) return;
-            bool h = Input.GetKeyDown(KeyCode.H);
-            bool r = Input.GetKeyDown(KeyCode.R);
+            bool h = Input.GetKeyDown(Plugin.HintToggleKey);
+            bool r = Input.GetKeyDown(Plugin.HintPageKey);
             if (!h && !r) return;
 
             var hoverObj = __instance.GetHoverObject();
@@ -6041,8 +6054,8 @@ namespace EnvReporter
             var player = Player.m_localPlayer;
             if (player == null) return;
 
-            // G key: instant cart release
-            if (Input.GetKeyDown(KeyCode.G))
+            // Configurable key: instant cart release
+            if (Input.GetKeyDown(Plugin.CartReleaseKey))
             {
                 // Find any nearby Vagon (cart drags behind player so check generous range)
                 Vagon? wagon = null;
@@ -6060,12 +6073,12 @@ namespace EnvReporter
                 }
                 else
                 {
-                    player.Message(MessageHud.MessageType.TopLeft, "[G] No cart nearby.");
+                    player.Message(MessageHud.MessageType.TopLeft, $"[{Plugin.CartReleaseKey}] No cart nearby.");
                 }
             }
 
-            // X key: toggle cart handbrake (only while attached)
-            if (Input.GetKeyDown(KeyCode.B))
+            // Toggle cart handbrake (only while attached)
+            if (Input.GetKeyDown(Plugin.CartBrakeKey))
             {
                 Vagon? brakeTarget = null;
                 foreach (var v in Object.FindObjectsOfType<Vagon>())
@@ -7221,6 +7234,9 @@ namespace EnvReporter
     public class CartsConfig
     {
         public bool Enabled { get; set; } = true;
+        // Keys as UnityEngine.KeyCode names (e.g. "Q", "G", "Keypad0").
+        public string ReleaseKey { get; set; } = "Q";  // instant cart grab/release
+        public string BrakeKey   { get; set; } = "B";  // toggle cart handbrake
     }
 
     public class EquipmentConfig
@@ -7246,6 +7262,10 @@ namespace EnvReporter
         public float  Cooldown  { get; set; } = 60f;
         public bool   ShowHints { get; set; } = true;
         public float  ComfortPeakMultiplier { get; set; } = 4f;
+        // Keys as UnityEngine.KeyCode names.
+        public string RelinquishKey { get; set; } = "Z";  // hold to relinquish all active rituals
+        public string HintToggleKey { get; set; } = "H";  // toggle offering hints at a campfire
+        public string HintPageKey   { get; set; } = "R";  // cycle hint page
         public Dictionary<string, float> FireMultipliers { get; set; } = new Dictionary<string, float>
         {
             ["fire_pit"]      = 1.0f,
