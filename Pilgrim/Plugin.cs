@@ -8,6 +8,7 @@ using HarmonyLib;
 using UnityEngine;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
+using YamlDotNet.RepresentationModel;
 
 namespace EnvReporter
 {
@@ -62,25 +63,26 @@ namespace EnvReporter
                     .WithNamingConvention(UnderscoredNamingConvention.Instance)
                     .IgnoreUnmatchedProperties()
                     .Build();
-                Cfg = des.Deserialize<PilgrimConfig>(File.ReadAllText(ConfigPath));
+                string onDisk = File.ReadAllText(ConfigPath);
+                Cfg = des.Deserialize<PilgrimConfig>(onDisk);
 
-                // Backfill any ritual keys missing from the on-disk config (e.g. added in a later version)
+                // Backfill ritual keys into the in-memory config so a newly-added ritual is usable
+                // even before the file is rewritten below.
                 var defaults = PilgrimConfig.Default();
-                bool backfilled = false;
                 foreach (var (key, val) in defaults.Rituals.Items)
+                    if (!Cfg.Rituals.Items.ContainsKey(key)) Cfg.Rituals.Items[key] = val;
+
+                // Generic backfill: if the on-disk YAML is missing ANY key the full config has
+                // (new fields added in a later version), rewrite the file with the complete set —
+                // preserving the user's existing values — so every field is present and editable.
+                var serializer = new SerializerBuilder()
+                    .WithNamingConvention(UnderscoredNamingConvention.Instance)
+                    .Build();
+                string full = serializer.Serialize(Cfg);
+                if (OnDiskMissingKeys(onDisk, full))
                 {
-                    if (Cfg.Rituals.Items.ContainsKey(key)) continue;
-                    Cfg.Rituals.Items[key] = val;
-                    backfilled = true;
-                }
-                if (backfilled)
-                {
-                    var yaml = new SerializerBuilder()
-                        .WithNamingConvention(UnderscoredNamingConvention.Instance)
-                        .Build()
-                        .Serialize(Cfg);
-                    File.WriteAllText(ConfigPath, yaml);
-                    Log.LogInfo("[Pilgrim] Backfilled missing ritual config keys.");
+                    File.WriteAllText(ConfigPath, full);
+                    Log.LogInfo("[Pilgrim] Backfilled missing config keys.");
                 }
 
                 Log.LogInfo("[Pilgrim] Config loaded.");
@@ -90,6 +92,43 @@ namespace EnvReporter
                 Log.LogError($"[Pilgrim] Config load failed: {ex.Message} — using defaults.");
                 Cfg = PilgrimConfig.Default();
             }
+        }
+
+        // True if the on-disk YAML is missing any mapping key present in the full serialized config.
+        // Compares key presence only (not values), recursing into nested maps — so user-edited values
+        // are never flagged, but newly-added fields are. Dict/sequence contents aren't recursed.
+        static bool OnDiskMissingKeys(string onDisk, string full)
+        {
+            try
+            {
+                YamlNode? Root(string text)
+                {
+                    var stream = new YamlStream();
+                    using var sr = new StringReader(text);
+                    stream.Load(sr);
+                    return stream.Documents.Count > 0 ? stream.Documents[0].RootNode : null;
+                }
+                return !DiskHasAllKeys(Root(onDisk), Root(full));
+            }
+            catch (System.Exception ex)
+            {
+                Log.LogWarning($"[Pilgrim] Config backfill check failed: {ex.Message}");
+                return false; // don't rewrite on parse trouble
+            }
+        }
+
+        static bool DiskHasAllKeys(YamlNode? disk, YamlNode? full)
+        {
+            if (full is YamlMappingNode fm)
+            {
+                if (!(disk is YamlMappingNode dm)) return false;
+                foreach (var kv in fm.Children)
+                {
+                    if (!dm.Children.TryGetValue(kv.Key, out var diskChild)) return false;
+                    if (!DiskHasAllKeys(diskChild, kv.Value)) return false;
+                }
+            }
+            return true;
         }
 
         // Ritual item accessors — item prefab names come from config
@@ -5227,6 +5266,295 @@ namespace EnvReporter
         }
     }
 
+    // ── Ship: mountable deck fixture (fire pit / torch) ───────────────────────
+    // The player mounts a fixture on a ship by interacting with the mast. It costs either one
+    // carryable item (longship/drakkar → the Ironpit item) or a set of resources (karve → the
+    // resin torch), refunded on removal — exactly like building and dismantling a piece. The ship
+    // ZDO stores the fixture's ZDOID so clients find the instance.
+    //
+    // The fixture is a static build piece (no ZSyncTransform), so its fuel/lit state syncs through
+    // its own Fireplace ZDO and hover-refuel/light work vanilla. We parent its transform under the
+    // ship on every client so it rides the deck; the owner nudges the fixture's ZDO position to the
+    // ship each tick so it isn't culled when sailing far.
+    static class ShipMount
+    {
+        internal const string ZdoKey     = "pilgrim_firepit";      // ZDOID of the fixture, on the ship ZDO
+        internal const string ItemZdoKey = "pilgrim_firepit_item"; // prefab name of a consumed item, for refund
+        const string MountName           = "PilgrimDeckMount";
+
+        static ShipsConfig Cfg => Plugin.Cfg.Ships;
+
+        internal static string HullName(Ship ship) =>
+            ship.gameObject.name.ToLower().Replace("(clone)", "").Trim();
+
+        // What a given hull can mount, if anything.
+        internal struct Spec
+        {
+            public string  Piece;      // build piece spawned as the deck fixture
+            public string  Noun;       // "fire pit" / "torch" — for hover & messages
+            public bool    CostIsItem; // true: one carryable item (ItemToken); false: Resources
+            public string  ItemToken;  // shared-name token of the carryable item
+            public (string prefab, int amount)[] Resources;
+            public string  Fuel;       // resource prefab that is the fixture's fuel — NOT refunded on removal
+            public bool    StartUnlit; // zero the Fireplace fuel on mount
+            public Vector3 Offset;     // fixture local position on the hull
+            public Vector3 MastOffset; // interact-volume local position
+        }
+
+        internal static Spec? GetSpec(Ship ship)
+        {
+            if (!Cfg.Enabled) return null;
+            string n = HullName(ship);
+            if (Cfg.FirePit && (n == "vikingship" || n == "vikingship_ashlands"))
+            {
+                bool drakkar = n == "vikingship_ashlands";
+                return new Spec
+                {
+                    Piece = "fire_pit_iron", Noun = "fire pit",
+                    CostIsItem = true, ItemToken = "$item_ironpit", StartUnlit = true, Fuel = "Wood",
+                    Offset     = drakkar
+                        ? new Vector3(Cfg.DrakkarFirePitX, Cfg.DrakkarFirePitY, Cfg.DrakkarFirePitZ)
+                        : new Vector3(Cfg.FirePitX, Cfg.FirePitY, Cfg.FirePitZ),
+                    MastOffset = new Vector3(Cfg.MastX, Cfg.MastY, Cfg.MastZ),
+                };
+            }
+            if (Cfg.KarveTorch && n == "karve")
+                return new Spec
+                {
+                    Piece = Cfg.KarveTorchPiece, Noun = "torch",
+                    CostIsItem = false,
+                    Resources  = new[] { ("Wood", Cfg.TorchWood), ("Resin", Cfg.TorchResin) },
+                    Fuel       = "Resin",
+                    StartUnlit = false,
+                    Offset     = new Vector3(Cfg.TorchX,     Cfg.TorchY,     Cfg.TorchZ),
+                    MastOffset = new Vector3(Cfg.KarveMastX, Cfg.KarveMastY, Cfg.KarveMastZ),
+                };
+            return null;
+        }
+
+        // Per-tick upkeep: keep the mast interact target present, and keep any attached fixture riding.
+        internal static void Tick(Ship ship, Spec spec)
+        {
+            EnsureMount(ship, spec);
+            RideAttached(ship, spec);
+        }
+
+        // Invisible interact volume around the mast — created once per ship.
+        static void EnsureMount(Ship ship, Spec spec)
+        {
+            if (ship.transform.Find(MountName) != null) return;
+            var go = new GameObject(MountName);
+            go.transform.SetParent(ship.transform, worldPositionStays: false);
+            go.transform.localPosition = spec.MastOffset;
+            int layer = LayerMask.NameToLayer("piece");
+            if (layer >= 0) go.layer = layer;           // in the player's interact raycast mask
+            var col = go.AddComponent<BoxCollider>();
+            col.size      = new Vector3(1.4f, 3.5f, 1.4f);
+            col.isTrigger = true;                         // raycast still hits (queriesHitTriggers=true); no physical blocking
+            go.AddComponent<ShipMountInteract>().m_ship = ship;
+        }
+
+        internal static bool IsAttached(Ship ship)
+        {
+            var nv = ship.GetComponent<ZNetView>();
+            return nv != null && nv.IsValid() && nv.GetZDO().GetZDOID(ZdoKey) != ZDOID.None;
+        }
+
+        static GameObject? Attached(Ship ship)
+        {
+            var nv = ship.GetComponent<ZNetView>();
+            if (nv == null || !nv.IsValid()) return null;
+            var id = nv.GetZDO().GetZDOID(ZdoKey);
+            return id != ZDOID.None ? ZNetScene.instance?.FindInstance(id) : null;
+        }
+
+        // If a fixture is attached, make sure it rides the hull (all clients). No spawning here.
+        static void RideAttached(Ship ship, Spec spec)
+        {
+            var nv = ship.GetComponent<ZNetView>();
+            if (nv == null || !nv.IsValid()) return;
+            var go = Attached(ship);
+            if (go == null) return;
+            SetupRiding(ship, go, spec);
+            if (nv.IsOwner())
+            {
+                var fnv = go.GetComponent<ZNetView>();
+                if (fnv != null && fnv.IsValid()) fnv.GetZDO().SetPosition(ship.transform.position);
+            }
+        }
+
+        // Make a fixture ride the deck: disable grounding wear, own kinematic RB (so the hover raycast
+        // resolves to the fixture not the hull, and its colliders aren't folded into the ship's compound
+        // body), parent to the hull, and ignore-collide with the hull so it can't shove it over.
+        static void SetupRiding(Ship ship, GameObject go, Spec spec)
+        {
+            var wnt = go.GetComponent<WearNTear>();
+            if (wnt != null) wnt.m_noSupportWear = false;
+
+            if (go.GetComponent<Rigidbody>() == null)
+            {
+                var frb = go.AddComponent<Rigidbody>();
+                frb.isKinematic   = true;
+                frb.useGravity    = false;
+                frb.interpolation = RigidbodyInterpolation.Interpolate;
+            }
+
+            if (go.transform.parent != ship.transform)
+            {
+                go.transform.SetParent(ship.transform, worldPositionStays: false);
+                go.transform.localPosition = spec.Offset;
+                go.transform.localRotation = Quaternion.identity;
+
+                var shipCols = ship.GetComponentsInChildren<Collider>();
+                foreach (var fc in go.GetComponentsInChildren<Collider>())
+                    foreach (var sc in shipCols)
+                        if (fc != null && sc != null) Physics.IgnoreCollision(fc, sc, true);
+            }
+        }
+
+        // Does the player have the cost on hand? (Carryable items match on shared-name token — the
+        // Ironpit item is a different prefab from the fire_pit_iron piece — resources match by prefab.)
+        internal static bool CanAfford(Player player, Spec spec)
+        {
+            if (player == null) return false;
+            var inv = player.GetInventory();
+            if (spec.CostIsItem)
+                return inv.GetAllItems().Any(i => i.m_shared.m_name == spec.ItemToken);
+            foreach (var (prefab, amount) in spec.Resources)
+                if (ItemUtil.CountByPrefab(inv, prefab) < amount) return false;
+            return true;
+        }
+
+        // Human-readable cost, e.g. "an Iron Fire Pit" or "1 Wood, 1 Resin".
+        static string CostText(Spec spec)
+        {
+            if (spec.CostIsItem) return "an Iron Fire Pit";
+            return string.Join(", ", spec.Resources.Select(r => $"{r.amount} {CartUpgrade.DisplayName(r.prefab)}"));
+        }
+
+        internal static void Attach(Ship ship, Player player, Spec spec)
+        {
+            var nv = ship.GetComponent<ZNetView>();
+            if (nv == null || !nv.IsValid() || IsAttached(ship)) return;
+
+            if (!CanAfford(player, spec))
+            { player.Message(MessageHud.MessageType.Center, $"Requires {CostText(spec)}"); return; }
+
+            var prefab = ZNetScene.instance?.GetPrefab(spec.Piece);
+            if (prefab == null) { Plugin.Log.LogWarning($"[Pilgrim] Mount piece '{spec.Piece}' not found"); return; }
+
+            nv.ClaimOwnership();
+            var go  = Object.Instantiate(prefab, ship.transform.TransformPoint(spec.Offset), ship.transform.rotation);
+            var fnv = go.GetComponent<ZNetView>();
+            if (fnv == null || !fnv.IsValid()) { Object.Destroy(go); return; }
+            if (spec.StartUnlit) fnv.GetZDO().Set(ZDOVars.s_fuel, 0f); // feed it fuel like any fire
+            nv.GetZDO().Set(ZdoKey, fnv.GetZDO().m_uid);
+
+            var inv = player.GetInventory();
+            if (spec.CostIsItem)
+            {
+                var item = inv.GetAllItems().FirstOrDefault(i => i.m_shared.m_name == spec.ItemToken);
+                if (item != null)
+                {
+                    nv.GetZDO().Set(ItemZdoKey, ItemUtil.PrefabName(item)); // remember exactly what to refund
+                    inv.RemoveOneItem(item);
+                }
+            }
+            else
+            {
+                foreach (var (p, amount) in spec.Resources) ItemUtil.RemoveByPrefab(inv, p, amount);
+            }
+
+            SetupRiding(ship, go, spec);
+            player.Message(MessageHud.MessageType.Center, $"Mounted {spec.Noun}");
+            Plugin.Log.LogInfo($"[Pilgrim] Mounted {spec.Noun} on {HullName(ship)}");
+        }
+
+        internal static void Detach(Ship ship, Player player, Spec spec)
+        {
+            var nv = ship.GetComponent<ZNetView>();
+            if (nv == null || !nv.IsValid() || !IsAttached(ship)) return;
+
+            nv.ClaimOwnership();
+            var go = Attached(ship);
+            if (go != null && ZNetScene.instance != null)
+            {
+                var fnv = go.GetComponent<ZNetView>();
+                if (fnv != null && fnv.IsValid()) fnv.ClaimOwnership();
+                ZNetScene.instance.Destroy(go);
+            }
+
+            var inv = player.GetInventory();
+            if (spec.CostIsItem)
+            {
+                string refund = nv.GetZDO().GetString(ItemZdoKey, "");
+                if (string.IsNullOrEmpty(refund)) refund = ResolveItemPrefab(spec.ItemToken);
+                if (!string.IsNullOrEmpty(refund)) inv.AddItem(refund, 1, 1, 0, 0L, "", false);
+            }
+            else
+            {
+                // Refund the structure, not the fuel (e.g. torch returns its Wood but not its Resin).
+                foreach (var (p, amount) in spec.Resources)
+                    if (p != spec.Fuel) inv.AddItem(p, amount, 1, 0, 0L, "", false);
+            }
+
+            nv.GetZDO().Set(ZdoKey, ZDOID.None);
+            nv.GetZDO().Set(ItemZdoKey, "");
+            player.Message(MessageHud.MessageType.Center, $"Removed {spec.Noun}");
+            Plugin.Log.LogInfo($"[Pilgrim] Removed {spec.Noun} from {HullName(ship)}");
+        }
+
+        // Resolve a carryable item's prefab name from ObjectDB by its shared-name token (fallback
+        // refund when the ship ZDO didn't record it, e.g. mounted by an older build).
+        static string ResolveItemPrefab(string token)
+        {
+            var go = ObjectDB.instance?.m_items?.Find(g =>
+                g != null && g.GetComponent<ItemDrop>()?.m_itemData?.m_shared?.m_name == token);
+            return go != null ? go.name : "";
+        }
+    }
+
+    // Invisible interact target at the mast: tap Use to mount/remove the deck fixture.
+    class ShipMountInteract : MonoBehaviour, Hoverable, Interactable
+    {
+        internal Ship? m_ship;
+
+        public string GetHoverName() => "Mast";
+        public float  GetHoverOffset() => 0f;
+
+        public string GetHoverText()
+        {
+            if (m_ship == null) return "";
+            var spec = ShipMount.GetSpec(m_ship);
+            if (spec == null) return "";
+            string verb = ShipMount.IsAttached(m_ship) ? "Remove" : "Mount";
+            return $"Mast\n[<color=yellow><b>E</b></color>] {verb} {spec.Value.Noun}";
+        }
+
+        public bool Interact(Humanoid user, bool hold, bool alt)
+        {
+            if (hold || m_ship == null || !(user is Player player)) return false;
+            var spec = ShipMount.GetSpec(m_ship);
+            if (spec == null) return false;
+            if (ShipMount.IsAttached(m_ship)) ShipMount.Detach(m_ship, player, spec.Value);
+            else                               ShipMount.Attach(m_ship, player, spec.Value);
+            return true;
+        }
+
+        public bool UseItem(Humanoid user, ItemDrop.ItemData item) => false;
+    }
+
+    [HarmonyPatch(typeof(Ship), "CustomFixedUpdate")]
+    static class ShipMountPatch
+    {
+        static void Postfix(Ship __instance)
+        {
+            var spec = ShipMount.GetSpec(__instance);
+            if (spec == null) return;
+            ShipMount.Tick(__instance, spec.Value);
+        }
+    }
+
     // ── Cart: drop upgrade materials on destruction ──────────────────────────
 
     [HarmonyPatch(typeof(WearNTear), "Awake")]
@@ -7290,6 +7618,37 @@ namespace EnvReporter
         public bool  Enabled        { get; set; } = true;
         public bool  NoDamageFilter { get; set; } = true;
         public float NoDamageRadius { get; set; } = 10f;
+
+        // Deck fire pit — a real fire_pit_iron the player mounts by interacting with the mast
+        // (costs one fire_pit_iron item, refunded on removal). Longship + Ashlands drakkar only.
+        // FirePit* = the fire's LOCAL position on the hull (default ~2m BEHIND the mast). Mast* =
+        // the local position of the invisible interact volume around the mast. Tune via YAML + relaunch.
+        public bool  FirePit        { get; set; } = true;
+        public float FirePitX       { get; set; } = 0f;
+        public float FirePitY       { get; set; } = 0.5f;
+        public float FirePitZ       { get; set; } = -2f;
+        public float MastX          { get; set; } = 0f;
+        public float MastY          { get; set; } = 1.5f;
+        public float MastZ          { get; set; } = 0f;
+
+        // Drakkar (Ashlands longship) has a higher deck than the vikingship, so it gets its own
+        // fire-pit offset.
+        public float DrakkarFirePitX { get; set; } = 0f;
+        public float DrakkarFirePitY { get; set; } = 1.9f;
+        public float DrakkarFirePitZ { get; set; } = -3.5f;
+
+        // Karve resin torch — resource-based (no carryable item). The cost is refunded on removal.
+        // Piece/costs are config so a wrong prefab name can be fixed in YAML without a rebuild.
+        public bool   KarveTorch      { get; set; } = true;
+        public string KarveTorchPiece { get; set; } = "piece_groundtorch_wood";
+        public int    TorchWood       { get; set; } = 1;
+        public int    TorchResin      { get; set; } = 1;
+        public float  TorchX          { get; set; } = 0f;
+        public float  TorchY          { get; set; } = 0.5f;
+        public float  TorchZ          { get; set; } = -1.5f;
+        public float  KarveMastX      { get; set; } = 0f;
+        public float  KarveMastY      { get; set; } = 1.2f;
+        public float  KarveMastZ      { get; set; } = 0f;
     }
 
     public class RitualsConfig
