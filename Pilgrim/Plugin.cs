@@ -850,7 +850,7 @@ namespace EnvReporter
         internal static void SpawnVfxLocal(GameObject prefab, Vector3 pos, Quaternion rot, float destroyDelay)
         {
             prefab.SetActive(false);
-            var go = UnityEngine.Object.Instantiate(prefab, pos, rot);
+            var go = UnityEngine.Object.Instantiate(prefab, pos + Vector3.up * 0.5f, rot);  // lift ~1/2m so the ground doesn't occlude it
             prefab.SetActive(true);
             // Destroy all components that call GetComponent<ZNetView> in Awake before activating.
             // NOTE: ZSFX is intentionally NOT stripped — it drives the sound (m_playOnAwake) and
@@ -860,9 +860,13 @@ namespace EnvReporter
             foreach (var mb in go.GetComponentsInChildren<MonoBehaviour>(true))
                 if (mb != null && System.Array.IndexOf(netTypes, mb.GetType().Name) >= 0)
                     UnityEngine.Object.DestroyImmediate(mb);
+            if (((UnityEngine.Object)prefab).name == "fx_fireskeleton_nova") BoonFx.ScaleDensity(go, 2f); // beefier ritual nova
             go.SetActive(true);
             if (destroyDelay > 0f) UnityEngine.Object.Destroy(go, destroyDelay);
         }
+
+        // hierarchy path of a transform, for UI dumps
+        static string GoPath(Transform t) { string s = t.name; while ((t = t.parent) != null) s = t.name + "/" + s; return s; }
 
         // Force a debug environment on every client.
         internal static void BroadcastEnv(string name, string vanillaFallback = "")
@@ -894,6 +898,163 @@ namespace EnvReporter
 
         void RegisterCommands()
         {
+            // ── boon testing ────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_boon_xp", "give boon XP (default 50)", args =>
+            {
+                var p = Player.m_localPlayer;
+                if (p == null || BoonHud.State == null) { args.Context.AddString("no player / boon state"); return; }
+                int amt = 50; if (args.Length > 1) int.TryParse(args[1], out amt);
+                BoonHud.State.AddXp(amt); BoonHud.State.Save(p); BoonStats.Apply(p, BoonHud.State);
+                args.Context.AddString($"+{amt} xp → level {BoonHud.State.Level}, pending {BoonHud.State.Pending}");
+            });
+            new Terminal.ConsoleCommand("pilgrim_boon_level", "gain N boon levels (default 1)", args =>
+            {
+                var p = Player.m_localPlayer;
+                if (p == null || BoonHud.State == null) { args.Context.AddString("no player / boon state"); return; }
+                int n = 1; if (args.Length > 1) int.TryParse(args[1], out n);
+                for (int i = 0; i < n; i++)
+                    BoonHud.State.AddXp(BoonCfg.NeedForNext(BoonHud.State.Level) - BoonHud.State.Xp);
+                BoonHud.State.Save(p); BoonStats.Apply(p, BoonHud.State);
+                // (VFX fires from BoonHud's per-frame level-up detection — don't double-spawn here)
+                args.Context.AddString($"level {BoonHud.State.Level}, pending {BoonHud.State.Pending}");
+            });
+            new Terminal.ConsoleCommand("pilgrim_boon_respec", "clear boons, reset to level 1", args =>
+            {
+                var p = Player.m_localPlayer;
+                if (p == null || BoonHud.State == null) { args.Context.AddString("no player / boon state"); return; }
+                BoonHud.ForceClose(); BoonHud.State.Respec(); BoonHud.State.Save(p); BoonStats.Apply(p, BoonHud.State);
+                args.Context.AddString("boons reset to level 1");
+            });
+            new Terminal.ConsoleCommand("pilgrim_vfx_list", "list vfx prefab names [keyword]", args =>
+            {
+                string kw = args.Length > 1 ? args[1] : "";
+                var names = BoonFx.ListVfx(kw);
+                args.Context.AddString($"{names.Count} vfx/fx match '{kw}' — also in log");
+                Log.LogInfo($"[Pilgrim] VFX LIST ({names.Count}) kw='{kw}': {string.Join(", ", names)}");
+            });
+            new Terminal.ConsoleCommand("pilgrim_vfx", "spawn a vfx on you to preview <name>", args =>
+            {
+                if (args.Length < 2) { args.Context.AddString("usage: pilgrim_vfx <prefabName>"); return; }
+                args.Context.AddString(BoonFx.Preview(args[1]));
+            });
+            new Terminal.ConsoleCommand("pilgrim_vfx_tune", "spawn vfx w/ params: <name> [scale] [density] [lifetime] [r g b]", args =>
+            {
+                if (args.Length < 2) { args.Context.AddString("usage: pilgrim_vfx_tune <name> [scale] [density] [lifetime] [r g b]"); return; }
+                float F(int i, float def) => (args.Length > i && float.TryParse(args[i], out var v)) ? v : def;
+                float scale = F(2, 1f), density = F(3, 1.5f), life = F(4, 1f);
+                Color? tint = args.Length >= 8 ? new Color(F(5, 1f), F(6, 1f), F(7, 1f)) : (Color?)null;
+                args.Context.AddString(BoonFx.PreviewTuned(args[1], scale, density, life, tint));
+            });
+            new Terminal.ConsoleCommand("pilgrim_ui_dump", "list on-screen panel Images (sprite/size/ppu) [keyword]", args =>
+            {
+                string kw = args.Length > 1 ? args[1].ToLowerInvariant() : "";
+                var rows = UnityEngine.Resources.FindObjectsOfTypeAll<UnityEngine.UI.Image>()
+                    .Where(i => i != null && i.sprite != null && i.gameObject.scene.IsValid())      // live scene UI, not asset prefabs
+                    .Where(i => i.sprite.border != UnityEngine.Vector4.zero)                         // sliced panels only
+                    .Select(i => new { img = i, r = i.rectTransform.rect, path = GoPath(i.transform) })
+                    .Where(x => kw == "" || x.path.ToLowerInvariant().Contains(kw) || x.img.sprite.name.ToLowerInvariant().Contains(kw))
+                    .OrderByDescending(x => System.Math.Abs(x.r.width * x.r.height))
+                    .Take(40).ToList();
+                args.Context.AddString($"{rows.Count} sliced UI panels (biggest first) — also written to log:");
+                Log.LogInfo($"[Pilgrim] UI DUMP: {rows.Count} sliced panels (kw='{kw}')");
+                foreach (var x in rows)
+                {
+                    string line = $"{x.r.width:0}x{x.r.height:0} ppu{x.img.pixelsPerUnitMultiplier:0.#} '{x.img.sprite.name}' {(x.img.gameObject.activeInHierarchy ? "" : "(hidden) ")}@ {x.path}";
+                    args.Context.AddString("  " + line);
+                    Log.LogInfo("[Pilgrim]   " + line);
+                }
+            });
+
+            new Terminal.ConsoleCommand("pilgrim_sprites_dump", "export all loaded UI sprites to PNGs you can scroll through [keyword]", args =>
+            {
+                string kw = args.Length > 1 ? args[1].ToLowerInvariant() : "";
+                string outDir = Path.Combine(Paths.ConfigPath, "PilgrimSprites");
+                Directory.CreateDirectory(outDir);
+                var readable = new Dictionary<int, Texture2D>();   // cache per source texture
+                var used = new Dictionary<string, int>();          // dedupe names
+                int ok = 0, fail = 0;
+
+                Texture2D Readable(Texture2D src)
+                {
+                    if (readable.TryGetValue(src.GetInstanceID(), out var r)) return r;
+                    var rt = RenderTexture.GetTemporary(src.width, src.height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+                    Graphics.Blit(src, rt);
+                    var prev = RenderTexture.active; RenderTexture.active = rt;
+                    r = new Texture2D(src.width, src.height, TextureFormat.RGBA32, false);
+                    r.ReadPixels(new Rect(0, 0, src.width, src.height), 0, 0); r.Apply();
+                    RenderTexture.active = prev; RenderTexture.ReleaseTemporary(rt);
+                    readable[src.GetInstanceID()] = r; return r;
+                }
+
+                var sprites = UnityEngine.Resources.FindObjectsOfTypeAll<Sprite>()
+                    .Where(s => s != null && s.texture != null && !string.IsNullOrEmpty(s.name))
+                    .Where(s => kw == "" || s.name.ToLowerInvariant().Contains(kw))
+                    .GroupBy(s => s.name).Select(g => g.First())   // one per unique name
+                    .ToList();
+                args.Context.AddString($"Exporting {sprites.Count} sprites to {outDir} …");
+                Log.LogInfo($"[Pilgrim] sprite dump → {outDir} ({sprites.Count} sprites, kw='{kw}')");
+                var manifest = new List<string>();
+
+                foreach (var s in sprites)
+                {
+                    try
+                    {
+                        var rd = Readable(s.texture);
+                        var tr = s.textureRect;
+                        int x = Mathf.Clamp((int)tr.x, 0, rd.width - 1), y = Mathf.Clamp((int)tr.y, 0, rd.height - 1);
+                        int w = Mathf.Clamp((int)tr.width, 1, rd.width - x), h = Mathf.Clamp((int)tr.height, 1, rd.height - y);
+                        var px = rd.GetPixels(x, y, w, h);
+                        var outTex = new Texture2D(w, h, TextureFormat.RGBA32, false);
+                        outTex.SetPixels(px); outTex.Apply();
+                        string nm = s.name; foreach (char c in Path.GetInvalidFileNameChars()) nm = nm.Replace(c, '_');
+                        if (used.TryGetValue(nm, out int n)) { used[nm] = n + 1; nm = $"{nm}_{n}"; } else used[nm] = 1;
+                        File.WriteAllBytes(Path.Combine(outDir, nm + ".png"), outTex.EncodeToPNG());
+                        Object.Destroy(outTex); ok++;
+                        var b = s.border;
+                        bool sliced = b != Vector4.zero;
+                        manifest.Add($"{s.name,-40} {w}x{h,-10} {(sliced ? $"9-slice border L{b.x:0} B{b.y:0} R{b.z:0} T{b.w:0}" : "flat (no 9-slice)")}");
+                    }
+                    catch (System.Exception e) { fail++; Log.LogWarning($"[Pilgrim]   sprite '{s.name}' failed: {e.Message}"); }
+                }
+                foreach (var t in readable.Values) Object.Destroy(t);
+                manifest.Sort();
+                File.WriteAllText(Path.Combine(outDir, "_manifest.txt"),
+                    "sprite name                              size       9-slice border (left bottom right top)\n" +
+                    "----------------------------------------------------------------------------------------\n" +
+                    string.Join("\n", manifest));
+                string msg = $"Done: {ok} exported, {fail} failed → {outDir} (see _manifest.txt for sizes + 9-slice borders)";
+                args.Context.AddString(msg); Log.LogInfo("[Pilgrim] " + msg);
+            });
+
+            new Terminal.ConsoleCommand("pilgrim_whichpanel", "find the panel sprite hosting the trophies/achievements buttons", args =>
+            {
+                // locate the buttons by name, then walk ancestors for the first sliced-panel Image
+                var btns = UnityEngine.Resources.FindObjectsOfTypeAll<UnityEngine.UI.Button>()
+                    .Where(b => b != null && b.gameObject.scene.IsValid())
+                    .Where(b => { string n = b.name.ToLowerInvariant(); return n.Contains("trophy") || n.Contains("trophies") || n.Contains("achiev"); })
+                    .ToList();
+                args.Context.AddString($"{btns.Count} trophy/achievement buttons — also written to log:");
+                Log.LogInfo($"[Pilgrim] WHICHPANEL: {btns.Count} trophy/achievement buttons");
+                foreach (var b in btns)
+                {
+                    Log.LogInfo($"[Pilgrim]   button '{b.name}' @ {GoPath(b.transform)}");
+                    args.Context.AddString($"  button '{b.name}' @ {GoPath(b.transform)}");
+                    var t = b.transform;
+                    while (t != null)
+                    {
+                        var img = t.GetComponent<UnityEngine.UI.Image>();
+                        if (img != null && img.sprite != null && img.sprite.border != UnityEngine.Vector4.zero)
+                        {
+                            var r = img.rectTransform.rect;
+                            string line = $"    -> PANEL '{img.sprite.name}' {r.width:0}x{r.height:0} ppu{img.pixelsPerUnitMultiplier:0.#} @ {GoPath(img.transform)}";
+                            args.Context.AddString(line);
+                            Log.LogInfo("[Pilgrim] " + line);
+                        }
+                        t = t.parent;
+                    }
+                }
+            });
+
             // ── ath_envstate ────────────────────────────────────────────────
             new Terminal.ConsoleCommand("ath_envstate", "world env, TOD, raid, wind", args =>
             {
@@ -7492,6 +7653,31 @@ namespace EnvReporter
 
     // ── Config classes ───────────────────────────────────────────────────────
 
+    public class BoonsConfig
+    {
+        public bool   Enabled           { get; set; } = true;
+        public int    XpPerKill         { get; set; } = 10;
+        public int    DrawCount         { get; set; } = 3;
+        public float  TakeChance        { get; set; } = 0.60f;
+        public float  PristineOdds      { get; set; } = 0.08f;
+        public int    Rerolls           { get; set; } = 1;
+        public string LevelUpVfx        { get; set; } = "fx_frozenking_aspectspawn density=3; sfx_dverger_heal_start; sfx_dverger_heal_finish delay=1.5";
+        public float  LevelUpVfxDensity { get; set; } = 1.5f;
+        public string PickSfx           { get; set; } = "sfx_frozenking_charge_whoosh";   // extra sound when a boon is picked
+        public string ToggleSfx         { get; set; } = "";   // sound when opening the sheet / boon panel (find w/ pilgrim_vfx_list)
+        public string ChooserCardSprite { get; set; } = "crafting_panel_bkg"; // card bg sprite (blank = native button); browse with F8
+        public string ChooserPanelSprite { get; set; } = "woodpanel_settings"; // boon panel bg (blank = same as sheet)
+        public float  SheetScale         { get; set; } = 1.1f; // overall character-sheet scale
+        public float  ChooserPanelZoom  { get; set; } = 1.2f;
+        public string BoonAlert         { get; set; } = "ping"; // pulse|throb|bob|spin|shake|ping
+        public float  XpBarWidth        { get; set; } = 10f;
+        public float  XpBarNudgeX       { get; set; } = 0f;
+        public float  XpBarNudgeY       { get; set; } = 0f;
+        public string SheetToggleKey    { get; set; } = "Y";
+        public string SheetPanelSprite  { get; set; } = "woodpanel_highres";
+        public float  SheetPanelZoom    { get; set; } = 1.5f;
+    }
+
     public class PilgrimConfig
     {
         public TrophiesConfig   Trophies  { get; set; } = new TrophiesConfig();
@@ -7502,6 +7688,7 @@ namespace EnvReporter
         public EquipmentConfig  Equipment { get; set; } = new EquipmentConfig();
         public BuildConfig      Build     { get; set; } = new BuildConfig();
         public RitualsConfig    Rituals   { get; set; } = new RitualsConfig();
+        public BoonsConfig      Boons     { get; set; } = new BoonsConfig();
 
         public static PilgrimConfig Default() => new PilgrimConfig
         {
@@ -7512,6 +7699,7 @@ namespace EnvReporter
             Ships     = new ShipsConfig     { Enabled = true, NoDamageFilter = true, NoDamageRadius = 10f },
             Equipment = new EquipmentConfig { InstantEquipWhileMoving = true },
             Build     = new BuildConfig     { Enabled = true, ReachMultiplier = 4f },
+            Boons     = new BoonsConfig(),
             Rituals  = new RitualsConfig
             {
                 Enabled  = true,
