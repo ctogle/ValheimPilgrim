@@ -20,15 +20,14 @@ namespace EnvReporter
             _inst = go.AddComponent<BoonChooserUI>();
         }
 
-        // 5 tiers, D2-flavored colors: white/tan, blue, yellow, orange, deep-orange (legendary)
+        // 4 tiers, D2R mapping: white/tan, blue, yellow, orange (Unique = keystones)
         static readonly Color[] RarityCol = {
-            new Color(0.85f,0.82f,0.72f),  // common      — tan/white
-            new Color(0.42f,0.62f,0.96f),  // uncommon    — blue
-            new Color(0.96f,0.86f,0.32f),  // rare        — yellow
-            new Color(0.96f,0.56f,0.22f),  // exceptional — orange
-            new Color(1.00f,0.44f,0.12f),  // legendary   — deep orange
+            new Color(0.85f,0.82f,0.72f),  // common — tan/white
+            new Color(0.42f,0.62f,0.96f),  // magic  — blue
+            new Color(0.96f,0.86f,0.32f),  // rare   — yellow
+            new Color(0.96f,0.56f,0.22f),  // unique — orange (keystone)
         };
-        static readonly string[] RarityName = { "Common", "Uncommon", "Rare", "Exceptional", "Legendary" };
+        static readonly string[] RarityName = { "Common", "Uncommon", "Rare", "Unique" };
 
         const float BW = 244f, BH = 214f, BGAP = 16f, PAD = 24f, TITLE_H = 48f, REROLL_H = 46f;
 
@@ -41,7 +40,7 @@ namespace EnvReporter
         Button _rerollBtn;
         TextMeshProUGUI _rerollLabel;
 
-        class BoonBtn { public Button btn; public Image bg; public Image hi; public Image halo; public Image[] border; public TextMeshProUGUI rarity, name, give, take; }
+        class BoonBtn { public Button btn; public Image bg; public Image hi; public Image halo; public Image[] border; public TextMeshProUGUI rarity, name, give, give2, take; }
         readonly BoonBtn[] _boons = new BoonBtn[3];
 
         void BuildUI()
@@ -144,6 +143,7 @@ namespace EnvReporter
             card.name = Child(b.transform, 24, 26f, false); card.name.enableWordWrapping = true; card.name.fontStyle = FontStyles.Bold;
             card.name.outlineColor = Color.black; card.name.outlineWidth = 0.25f;   // white text, black lining
             card.give = Child(b.transform, 19, -18f, true);
+            card.give2 = Child(b.transform, 19, -34f, true);
             card.take = Child(b.transform, 19, -46f, true);
             return card;
         }
@@ -225,10 +225,29 @@ namespace EnvReporter
                 var col = RarityCol[r];
                 c.rarity.text = RarityName[r].ToUpper(); c.rarity.color = col;   // rarity shown by label + border
                 c.name.text = b.Name; c.name.color = Color.white;                // white text with black outline
-                c.give.text = b.GiveText; c.give.color = UiKit.Give;
-                // pure boon: list only the benefit, no cost line
-                if (b.HasTake) { c.take.gameObject.SetActive(true); c.take.text = b.TakeText; c.take.color = UiKit.Take; }
-                else c.take.gameObject.SetActive(false);
+                var gr = c.give.rectTransform;
+                if (b.IsKeystone)
+                {
+                    // keystone: flowery desc wrapped, aligned to the give/take band, in the unique colour
+                    c.give.gameObject.SetActive(true); c.give.text = b.Desc; c.give.color = col;
+                    c.give.enableWordWrapping = true; c.give.alignment = TextAlignmentOptions.Top; c.give.outlineWidth = 0f;
+                    gr.pivot = new Vector2(0.5f, 1f); gr.sizeDelta = new Vector2(BW - 24, 72); gr.anchoredPosition = new Vector2(0, -4);
+                    c.give2.gameObject.SetActive(false);
+                    c.take.gameObject.SetActive(false);
+                }
+                else
+                {
+                    // 1–2 give lines (green) + optional take (red), centred as a block in the give/take band
+                    // first give sits at a FIXED y (aligned across all cards); extra lines stack below
+                    c.give.enableWordWrapping = false; c.give.alignment = TextAlignmentOptions.Center; c.give.outlineWidth = 0f;
+                    gr.pivot = new Vector2(0.5f, 0.5f); gr.sizeDelta = new Vector2(BW - 18, 29);
+                    const float GY = -18f, SP = 24f; float y = GY;
+                    c.give.gameObject.SetActive(true); c.give.text = b.GiveText; c.give.color = UiKit.Give; gr.anchoredPosition = new Vector2(0, y); y -= SP;
+                    if (b.HasGive2) { var r2 = c.give2.rectTransform; r2.sizeDelta = new Vector2(BW - 18, 29); c.give2.gameObject.SetActive(true); c.give2.text = b.Give2Text; c.give2.color = UiKit.Give; r2.anchoredPosition = new Vector2(0, y); y -= SP; }
+                    else c.give2.gameObject.SetActive(false);
+                    if (b.HasTake) { var rt2 = c.take.rectTransform; rt2.sizeDelta = new Vector2(BW - 18, 29); c.take.gameObject.SetActive(true); c.take.text = b.TakeText; c.take.color = UiKit.Take; rt2.anchoredPosition = new Vector2(0, y); }
+                    else c.take.gameObject.SetActive(false);
+                }
                 // hover: flat darken veil + a pulsing rarity-coloured halo behind the card; others untouched
                 bool hovered = _hoverIdx == i;
                 if (c.bg != null) c.bg.color = new Color(0.70f, 0.70f, 0.70f);     // constant for all cards

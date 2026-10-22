@@ -7675,7 +7675,23 @@ namespace EnvReporter
         public float  XpBarNudgeY       { get; set; } = 0f;
         public string SheetToggleKey    { get; set; } = "Y";
         public string SheetPanelSprite  { get; set; } = "woodpanel_highres";
+        public string SheetSidecarSprite { get; set; } = "";   // legendaries sidecar sprite (blank = same as sheet)
         public float  SheetPanelZoom    { get; set; } = 1.5f;
+        // --- legendaries (Unique tier) ---
+        public float  LegendaryChance   { get; set; } = 0.20f;   // per card slot: chance to roll a keystone instead of a give/take boon
+        public float  RareChance        { get; set; } = 0.20f;   // per card slot: chance for a rare (2 gives + 1 take); remainder is common/uncommon
+        public bool   GriefEnabled      { get; set; } = true;    // "The wounds you inflict cannot be healed."
+        public bool   GraceEnabled      { get; set; } = true;    // "A mortal blow leaves you at 1 HP, once per minute."
+        public bool   ConvictionEnabled { get; set; } = true;    // "You cannot be staggered when blocking with a shield."
+        public bool   SonderEnabled     { get; set; } = true;    // "You are granted 3x experience gained."
+        public bool   DreadEnabled      { get; set; } = true;    // "You are granted sneak +30."
+        public bool   AvariceEnabled    { get; set; } = true;    // "You are granted 3x treasure."
+        public bool   RegretEnabled     { get; set; } = true;    // "You are granted 2x carrying weight."
+        public bool   ResentEnabled     { get; set; } = true;    // "Leftover damage after you block is reflected back to the attacker."
+        public bool   WrathEnabled      { get; set; } = true;    // "You deal 2x slash damage."
+        public bool   BetrayalEnabled   { get; set; } = true;    // "You deal 10x backstab damage with knives."
+        public bool   PanicEnabled      { get; set; } = true;    // "Drawing your bow takes 25% as long as normal."
+        public bool   NostalgiaEnabled  { get; set; } = true;    // "Foods last 20% longer."
     }
 
     public class PilgrimConfig
