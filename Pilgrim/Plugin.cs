@@ -5463,6 +5463,7 @@ namespace EnvReporter
     {
         internal const string ZdoKey     = "pilgrim_firepit";      // ZDOID of the fixture, on the ship ZDO
         internal const string ItemZdoKey = "pilgrim_firepit_item"; // prefab name of a consumed item, for refund
+        internal const string PieceZdoKey = "pilgrim_firepit_piece"; // which fixture is mounted (fire_pit_iron / torch piece)
         const string MountName           = "PilgrimDeckMount";
 
         static ShipsConfig Cfg => Plugin.Cfg.Ships;
@@ -5484,35 +5485,89 @@ namespace EnvReporter
             public Vector3 MastOffset; // interact-volume local position
         }
 
+        static bool IsLater(string n) => n == "vikingship" || n == "vikingship_ashlands";
+
+        // The iron fire pit (carryable-item cost) — longship/drakkar only.
+        internal static Spec FirePitSpec(Ship ship)
+        {
+            bool drakkar = HullName(ship) == "vikingship_ashlands";
+            return new Spec
+            {
+                Piece = "fire_pit_iron", Noun = "fire pit",
+                CostIsItem = true, ItemToken = "$item_ironpit", StartUnlit = true, Fuel = "Wood",
+                Offset     = drakkar
+                    ? new Vector3(Cfg.DrakkarFirePitX, Cfg.DrakkarFirePitY, Cfg.DrakkarFirePitZ)
+                    : new Vector3(Cfg.FirePitX, Cfg.FirePitY, Cfg.FirePitZ),
+                MastOffset = new Vector3(Cfg.MastX, Cfg.MastY, Cfg.MastZ),
+            };
+        }
+
+        // The resin torch (resource cost) — karve, and now the later ships too (sits where the fire pit would).
+        internal static Spec TorchSpec(Ship ship)
+        {
+            string n = HullName(ship);
+            bool drakkar = n == "vikingship_ashlands";
+            // on the later hulls the torch sits where the fire pit would, raised 0.75m (torch base is taller)
+            Vector3 off = n == "karve" ? new Vector3(Cfg.TorchX, Cfg.TorchY, Cfg.TorchZ)
+                        : drakkar      ? new Vector3(Cfg.DrakkarFirePitX, Cfg.DrakkarFirePitY + 0.75f, Cfg.DrakkarFirePitZ)
+                                       : new Vector3(Cfg.FirePitX, Cfg.FirePitY + 0.75f, Cfg.FirePitZ);
+            Vector3 mast = n == "karve" ? new Vector3(Cfg.KarveMastX, Cfg.KarveMastY, Cfg.KarveMastZ)
+                                        : new Vector3(Cfg.MastX, Cfg.MastY, Cfg.MastZ);
+            return new Spec
+            {
+                Piece = Cfg.KarveTorchPiece, Noun = "torch", CostIsItem = false,
+                Resources  = new[] { ("Wood", Cfg.TorchWood), ("Resin", Cfg.TorchResin) },
+                Fuel = "Resin", StartUnlit = false, Offset = off, MastOffset = mast,
+            };
+        }
+
+        // The spec for riding/removal/hover. If a fixture is mounted, resolve it from the recorded piece;
+        // otherwise return the hull's primary offer (fire pit on later ships, torch on the karve).
         internal static Spec? GetSpec(Ship ship)
         {
-            if (!Cfg.Enabled) return null;
+            if (!Cfg.Enabled || ship == null) return null;
             string n = HullName(ship);
-            if (Cfg.FirePit && (n == "vikingship" || n == "vikingship_ashlands"))
+            var nv = ship.GetComponent<ZNetView>();
+            if (IsAttached(ship) && nv != null && nv.IsValid())
             {
-                bool drakkar = n == "vikingship_ashlands";
-                return new Spec
-                {
-                    Piece = "fire_pit_iron", Noun = "fire pit",
-                    CostIsItem = true, ItemToken = "$item_ironpit", StartUnlit = true, Fuel = "Wood",
-                    Offset     = drakkar
-                        ? new Vector3(Cfg.DrakkarFirePitX, Cfg.DrakkarFirePitY, Cfg.DrakkarFirePitZ)
-                        : new Vector3(Cfg.FirePitX, Cfg.FirePitY, Cfg.FirePitZ),
-                    MastOffset = new Vector3(Cfg.MastX, Cfg.MastY, Cfg.MastZ),
-                };
+                string piece = nv.GetZDO().GetString(PieceZdoKey, "");
+                if (piece == Cfg.KarveTorchPiece) return TorchSpec(ship);
+                if (piece == "fire_pit_iron")     return FirePitSpec(ship);
+                return n == "karve" ? TorchSpec(ship) : (IsLater(n) ? FirePitSpec(ship) : (Spec?)null); // legacy
             }
-            if (Cfg.KarveTorch && n == "karve")
-                return new Spec
-                {
-                    Piece = Cfg.KarveTorchPiece, Noun = "torch",
-                    CostIsItem = false,
-                    Resources  = new[] { ("Wood", Cfg.TorchWood), ("Resin", Cfg.TorchResin) },
-                    Fuel       = "Resin",
-                    StartUnlit = false,
-                    Offset     = new Vector3(Cfg.TorchX,     Cfg.TorchY,     Cfg.TorchZ),
-                    MastOffset = new Vector3(Cfg.KarveMastX, Cfg.KarveMastY, Cfg.KarveMastZ),
-                };
+            if (IsLater(n) && Cfg.FirePit)    return FirePitSpec(ship);
+            if (n == "karve" && Cfg.KarveTorch) return TorchSpec(ship);
+            if (IsLater(n) && Cfg.KarveTorch) return TorchSpec(ship);
             return null;
+        }
+
+        // Which fixture to mount when the player taps a bare mast: prefer the fire pit if they can afford it,
+        // else the torch (so the later ships don't force you back to the karve before you have an iron pit).
+        internal static Spec? ChooseForMount(Ship ship, Player player)
+        {
+            if (!Cfg.Enabled || ship == null) return null;
+            if (IsLater(HullName(ship)))
+            {
+                Spec? fp = Cfg.FirePit ? FirePitSpec(ship) : (Spec?)null;
+                Spec? tc = Cfg.KarveTorch ? TorchSpec(ship) : (Spec?)null;
+                if (fp != null && CanAfford(player, fp.Value)) return fp;
+                if (tc != null && CanAfford(player, tc.Value)) return tc;
+                return fp ?? tc;   // nothing affordable → fall through so Attach shows the requirement
+            }
+            return GetSpec(ship);
+        }
+
+        // Hover label for a bare mast ("fire pit or torch" on later ships).
+        internal static string OfferNoun(Ship ship)
+        {
+            if (IsLater(HullName(ship)))
+            {
+                if (Cfg.FirePit && Cfg.KarveTorch) return "fire pit or torch";
+                if (Cfg.FirePit) return "fire pit";
+                if (Cfg.KarveTorch) return "torch";
+                return "";
+            }
+            return GetSpec(ship)?.Noun ?? "";
         }
 
         // Per-tick upkeep: keep the mast interact target present, and keep any attached fixture riding.
@@ -5632,6 +5687,7 @@ namespace EnvReporter
             if (fnv == null || !fnv.IsValid()) { Object.Destroy(go); return; }
             if (spec.StartUnlit) fnv.GetZDO().Set(ZDOVars.s_fuel, 0f); // feed it fuel like any fire
             nv.GetZDO().Set(ZdoKey, fnv.GetZDO().m_uid);
+            nv.GetZDO().Set(PieceZdoKey, spec.Piece);                   // remember which fixture is mounted
 
             var inv = player.GetInventory();
             if (spec.CostIsItem)
@@ -5683,6 +5739,7 @@ namespace EnvReporter
 
             nv.GetZDO().Set(ZdoKey, ZDOID.None);
             nv.GetZDO().Set(ItemZdoKey, "");
+            nv.GetZDO().Set(PieceZdoKey, "");
             player.Message(MessageHud.MessageType.Center, $"Removed {spec.Noun}");
             Plugin.Log.LogInfo($"[Pilgrim] Removed {spec.Noun} from {HullName(ship)}");
         }
@@ -5708,19 +5765,32 @@ namespace EnvReporter
         public string GetHoverText()
         {
             if (m_ship == null) return "";
-            var spec = ShipMount.GetSpec(m_ship);
-            if (spec == null) return "";
-            string verb = ShipMount.IsAttached(m_ship) ? "Remove" : "Mount";
-            return $"Mast\n[<color=yellow><b>E</b></color>] {verb} {spec.Value.Noun}";
+            if (ShipMount.IsAttached(m_ship))
+            {
+                var at = ShipMount.GetSpec(m_ship);
+                if (at == null) return "";
+                return $"Mast\n[<color=yellow><b>E</b></color>] Remove {at.Value.Noun}";
+            }
+            string offer = ShipMount.OfferNoun(m_ship);
+            if (string.IsNullOrEmpty(offer)) return "";
+            return $"Mast\n[<color=yellow><b>E</b></color>] Mount {offer}";
         }
 
         public bool Interact(Humanoid user, bool hold, bool alt)
         {
             if (hold || m_ship == null || !(user is Player player)) return false;
-            var spec = ShipMount.GetSpec(m_ship);
-            if (spec == null) return false;
-            if (ShipMount.IsAttached(m_ship)) ShipMount.Detach(m_ship, player, spec.Value);
-            else                               ShipMount.Attach(m_ship, player, spec.Value);
+            if (ShipMount.IsAttached(m_ship))
+            {
+                var at = ShipMount.GetSpec(m_ship);
+                if (at == null) return false;
+                ShipMount.Detach(m_ship, player, at.Value);
+            }
+            else
+            {
+                var pick = ShipMount.ChooseForMount(m_ship, player);
+                if (pick == null) return false;
+                ShipMount.Attach(m_ship, player, pick.Value);
+            }
             return true;
         }
 
