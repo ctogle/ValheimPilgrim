@@ -88,15 +88,15 @@ namespace EnvReporter
         {
             [KeystoneId.Grief]      = new KeystoneDef { Id = KeystoneId.Grief,      Name = "Grief",      Desc = "You are the wound that never heals",   Sheet = "Damage you inflict cannot be healed" },
             [KeystoneId.Grace]      = new KeystoneDef { Id = KeystoneId.Grace,      Name = "Grace",      Desc = "You are the gasp of a dying breath",    Sheet = "A mortal blow leaves you at 1 HP, once per minute" },
-            [KeystoneId.Conviction] = new KeystoneDef { Id = KeystoneId.Conviction, Name = "Conviction", Desc = "You are the shield that never yields", Sheet = "You cannot be staggered when blocking with a shield" },
-            [KeystoneId.Sonder]  = new KeystoneDef { Id = KeystoneId.Sonder,  Name = "Sonder",  Desc = "You are the wisdom of perspective", Sheet = "You are granted 3x experience gained" },
-            [KeystoneId.Dread]   = new KeystoneDef { Id = KeystoneId.Dread,   Name = "Dread",   Desc = "You are the premonition of danger",  Sheet = "You are granted sneak +30" },
-            [KeystoneId.Avarice] = new KeystoneDef { Id = KeystoneId.Avarice, Name = "Avarice", Desc = "You are the hand in every pocket",    Sheet = "You are granted 3x treasure" },
-            [KeystoneId.Regret]  = new KeystoneDef { Id = KeystoneId.Regret,  Name = "Regret",  Desc = "You'll bear anything but the weight of what you did", Sheet = "You are granted 2x carrying weight" },
+            [KeystoneId.Conviction] = new KeystoneDef { Id = KeystoneId.Conviction, Name = "Conviction", Desc = "You are the shield that never yields", Sheet = "Cannot be staggered while blocking with a shield" },
+            [KeystoneId.Sonder]  = new KeystoneDef { Id = KeystoneId.Sonder,  Name = "Sonder",  Desc = "You are the wisdom of perspective", Sheet = "Grants triple experience" },
+            [KeystoneId.Dread]   = new KeystoneDef { Id = KeystoneId.Dread,   Name = "Dread",   Desc = "You are the premonition of danger",  Sheet = "Grants sneak +30" },
+            [KeystoneId.Avarice] = new KeystoneDef { Id = KeystoneId.Avarice, Name = "Avarice", Desc = "You are the hand in every pocket",    Sheet = "Grants 3x treasure" },
+            [KeystoneId.Regret]  = new KeystoneDef { Id = KeystoneId.Regret,  Name = "Regret",  Desc = "You'll bear anything but the weight of what you did", Sheet = "Grants 2x carry weight" },
             [KeystoneId.Resent]  = new KeystoneDef { Id = KeystoneId.Resent,  Name = "Resent",  Desc = "You lash out and don't remember why anymore", Sheet = "Excess block force is reflected to the attacker" },
-            [KeystoneId.Wrath]    = new KeystoneDef { Id = KeystoneId.Wrath,    Name = "Wrath",    Desc = "Your anger shall not be mitigated",  Sheet = "You deal 2x slash damage" },
-            [KeystoneId.Betrayal] = new KeystoneDef { Id = KeystoneId.Betrayal, Name = "Betrayal", Desc = "You let them put their trust in you", Sheet = "You deal 10x backstab damage with knives" },
-            [KeystoneId.Panic]     = new KeystoneDef { Id = KeystoneId.Panic,     Name = "Panic",     Desc = "Your hands tremble with intent",      Sheet = "Drawing your bow takes 25% as long as normal" },
+            [KeystoneId.Wrath]    = new KeystoneDef { Id = KeystoneId.Wrath,    Name = "Wrath",    Desc = "Your anger shall not be mitigated",  Sheet = "Grants 2x slash damage" },
+            [KeystoneId.Betrayal] = new KeystoneDef { Id = KeystoneId.Betrayal, Name = "Betrayal", Desc = "You let them put their trust in you", Sheet = "Grants 10x backstab damage with knives" },
+            [KeystoneId.Panic]     = new KeystoneDef { Id = KeystoneId.Panic,     Name = "Panic",     Desc = "Your hands tremble with intent",      Sheet = "Bow draws in 25% the time" },
             [KeystoneId.Nostalgia] = new KeystoneDef { Id = KeystoneId.Nostalgia, Name = "Nostalgia", Desc = "You long for the fellowship of youth", Sheet = "Foods last 20% longer" },
         };
         internal static readonly KeystoneId[] All = Def.Keys.ToArray();
@@ -108,7 +108,8 @@ namespace EnvReporter
     {
         Damage, AtkStamina, MoveSpeed, HpRegen, StamRegen, Block, RunStamina, JumpStamina,
         BlockStamina, DodgeStamina, SwimStamina, SneakStamina, Stagger, FallDamage,
-        ArmorPct, Parry, EitrRegen, SwimSpeed, Stealth, CarryWeight
+        ArmorPct, Parry, EitrRegen, SwimSpeed, Stealth, CarryWeight,
+        BuildStamina, StaminaUse   // BuildStamina = hoe/hammer/cultivator; StaminaUse = GENERAL umbrella over all 8 leaves
     }
 
     internal sealed class AxisDef
@@ -118,6 +119,7 @@ namespace EnvReporter
         public string GiveAdj, GiveNoun, TakeAdj, TakeNoun, Noun;
         public bool Percent;             // display/semantics as % (else flat)
         public bool Cost;                // "cost" axis: a GIFT reduces the stat (shown as −), a COST raises it (+)
+        public bool General;             // umbrella axis over a domain's leaves → rarity-floored (can't roll Common)
     }
 
     internal static class Axes
@@ -126,7 +128,7 @@ namespace EnvReporter
         internal static readonly Dictionary<BoonAxis, AxisDef> Def = new()
         {
             [BoonAxis.Damage]      = new AxisDef { GiveAdj="Keen",      GiveNoun="the Edge",   TakeAdj="Dull",       TakeNoun="the Dull",   Noun="damage",        Percent=true },
-            [BoonAxis.AtkStamina]  = new AxisDef { GiveAdj="Fluid",     GiveNoun="Grace",      TakeAdj="Labored",    TakeNoun="Toil",       Noun="attack stamina use",Percent=true, Cost=true },
+            [BoonAxis.AtkStamina]  = new AxisDef { GiveAdj="Deft",      GiveNoun="the Flurry", TakeAdj="Taxing",     TakeNoun="the Exertion",Noun="attack stamina use",Percent=true, Cost=true },
             [BoonAxis.MoveSpeed]   = new AxisDef { GiveAdj="Swift",     GiveNoun="Haste",      TakeAdj="Sluggish",   TakeNoun="Sloth",      Noun="move speed",    Percent=true },
             [BoonAxis.HpRegen]     = new AxisDef { GiveAdj="Mending",   GiveNoun="Recovery",   TakeAdj="Festering",  TakeNoun="the Wound",  Noun="health regen",  Percent=true },
             [BoonAxis.StamRegen]   = new AxisDef { GiveAdj="Tireless",  GiveNoun="Endurance",  TakeAdj="Weary",      TakeNoun="Weariness",  Noun="stamina regen", Percent=true },
@@ -137,14 +139,16 @@ namespace EnvReporter
             [BoonAxis.DodgeStamina]= new AxisDef { GiveAdj="Nimble",    GiveNoun="Evasion",    TakeAdj="Clumsy",     TakeNoun="Clumsiness", Noun="dodge stamina use", Percent=true, Cost=true },
             [BoonAxis.SwimStamina] = new AxisDef { GiveAdj="Buoyant",   GiveNoun="the Tide",   TakeAdj="Sinking",    TakeNoun="the Depths", Noun="swim stamina use",  Percent=true, Cost=true },
             [BoonAxis.SneakStamina]= new AxisDef { GiveAdj="Quiet",     GiveNoun="Stillness",  TakeAdj="Restless",   TakeNoun="Restlessness",Noun="sneak stamina use",Percent=true, Cost=true },
-            [BoonAxis.Stagger]     = new AxisDef { GiveAdj="Unshaken",  GiveNoun="Poise",      TakeAdj="Faltering",  TakeNoun="the Falter", Noun="stagger taken", Percent=true, Cost=true },
+            [BoonAxis.Stagger]     = new AxisDef { GiveAdj="Unshaken",  GiveNoun="Poise",      TakeAdj="Faltering",  TakeNoun="the Falter", Noun="stagger",       Percent=true, Cost=true },
             [BoonAxis.FallDamage]  = new AxisDef { GiveAdj="Feathered", GiveNoun="the Feather",TakeAdj="Plummeting", TakeNoun="the Plummet",Noun="fall damage",   Percent=true, Cost=true },
             [BoonAxis.ArmorPct]    = new AxisDef { GiveAdj="Ironclad",  GiveNoun="the Aegis",  TakeAdj="Exposed",    TakeNoun="Exposure",   Noun="armor %",       Percent=true },
             [BoonAxis.Parry]       = new AxisDef { GiveAdj="Deflecting",GiveNoun="the Parry",  TakeAdj="Open",       TakeNoun="the Opening",Noun="parry bonus",   Percent=true },
             [BoonAxis.EitrRegen]   = new AxisDef { GiveAdj="Attuned",   GiveNoun="the Flow",   TakeAdj="Dim",        TakeNoun="the Dimming",Noun="eitr regen",    Percent=true },
             [BoonAxis.SwimSpeed]   = new AxisDef { GiveAdj="Gliding",   GiveNoun="the Current",TakeAdj="Dragging",   TakeNoun="the Drag",   Noun="swim speed",    Percent=true },
-            [BoonAxis.Stealth]     = new AxisDef { GiveAdj="Unseen",    GiveNoun="the Veil",   TakeAdj="Conspicuous",TakeNoun="the Glare",  Noun="stealth",       Percent=true },
+            [BoonAxis.Stealth]     = new AxisDef { GiveAdj="Unseen",    GiveNoun="the Veil",   TakeAdj="Conspicuous",TakeNoun="the Glare",  Noun="sneak",         Percent=true },
             [BoonAxis.CarryWeight] = new AxisDef { GiveAdj="Mighty",    GiveNoun="the Ox",     TakeAdj="Overladen",  TakeNoun="the Load",   Noun="carry weight",  Percent=false },
+            [BoonAxis.BuildStamina]= new AxisDef { GiveAdj="Industrious",GiveNoun="the Craft",TakeAdj="Toilsome",   TakeNoun="the Labor",  Noun="build stamina use",Percent=true, Cost=true },
+            [BoonAxis.StaminaUse]  = new AxisDef { GiveAdj="Fluid",     GiveNoun="Grace",      TakeAdj="Labored",    TakeNoun="Toil",       Noun="stamina use",   Percent=true, Cost=true, General=true },
         };
         internal static readonly BoonAxis[] All = (BoonAxis[])Enum.GetValues(typeof(BoonAxis));
     }
@@ -244,6 +248,8 @@ namespace EnvReporter
                 // common vs uncommon by magnitude: bigger gift / smaller cost = uncommon. (Rare & Unique are rolled by chance.)
                 float score = give - 0.5f * take + (b.HasTake ? 0f : 1.5f);
                 b.Rarity = score >= 5f ? 1 : 0;
+                // a GENERAL (umbrella) gift is broadly useful → rarity signal: it can't roll Common
+                if (Axes.Def[b.GiveAxis].General) b.Rarity = Math.Max(b.Rarity, 1);
             }
             return b;
         }
@@ -377,20 +383,22 @@ namespace EnvReporter
 
             var t = st.Totals();
             active.m_damageModifier           = 1f + t[BoonAxis.Damage]    / 100f;  // outgoing attack dmg ×
-            active.m_attackStaminaUseModifier = -(t[BoonAxis.AtkStamina]   / 100f); // negative = cheaper
-            active.m_runStaminaUseModifier    = -(t[BoonAxis.RunStamina]   / 100f);
-            active.m_jumpStaminaUseModifier   = -(t[BoonAxis.JumpStamina]  / 100f);
             active.m_speedModifier            =  t[BoonAxis.MoveSpeed]     / 100f;
             active.m_healthRegenMultiplier    = 1f + t[BoonAxis.HpRegen]   / 100f;
             active.m_staminaRegenMultiplier   = 1f + t[BoonAxis.StamRegen] / 100f;
             active.m_addArmor                 =  t[BoonAxis.Block];
             active.m_modifyAttackSkill        = Skills.SkillType.All;
 
-            // additional stamina-use axes (cost: negative = cheaper)
-            active.m_blockStaminaUseModifier  = -(t[BoonAxis.BlockStamina] / 100f);
-            active.m_dodgeStaminaUseModifier  = -(t[BoonAxis.DodgeStamina] / 100f);
-            active.m_swimStaminaUseModifier   = -(t[BoonAxis.SwimStamina]  / 100f);
-            active.m_sneakStaminaUseModifier  = -(t[BoonAxis.SneakStamina] / 100f);
+            // stamina-use axes (cost: negative = cheaper). The GENERAL "stamina use" adds to every leaf.
+            float gStam = t[BoonAxis.StaminaUse];
+            active.m_attackStaminaUseModifier   = -((t[BoonAxis.AtkStamina]   + gStam) / 100f);
+            active.m_runStaminaUseModifier      = -((t[BoonAxis.RunStamina]   + gStam) / 100f);
+            active.m_jumpStaminaUseModifier     = -((t[BoonAxis.JumpStamina]  + gStam) / 100f);
+            active.m_blockStaminaUseModifier    = -((t[BoonAxis.BlockStamina] + gStam) / 100f);
+            active.m_dodgeStaminaUseModifier    = -((t[BoonAxis.DodgeStamina] + gStam) / 100f);
+            active.m_swimStaminaUseModifier     = -((t[BoonAxis.SwimStamina]  + gStam) / 100f);
+            active.m_sneakStaminaUseModifier    = -((t[BoonAxis.SneakStamina] + gStam) / 100f);
+            active.m_homeItemStaminaUseModifier = -((t[BoonAxis.BuildStamina] + gStam) / 100f);
             // defense / utility
             active.m_staggerModifier          = -(t[BoonAxis.Stagger]      / 100f);  // negative = less stagger taken
             active.m_fallDamageModifier       = -(t[BoonAxis.FallDamage]   / 100f);  // negative = less fall damage
