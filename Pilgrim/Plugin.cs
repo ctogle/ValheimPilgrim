@@ -1026,6 +1026,28 @@ namespace EnvReporter
                 args.Context.AddString(msg); Log.LogInfo("[Pilgrim] " + msg);
             });
 
+            new Terminal.ConsoleCommand("pilgrim_enemy_hp", "dump creature base health (for XP tuning) to log + file", args =>
+            {
+                var zs = ZNetScene.instance;
+                if (zs == null) { args.Context.AddString("ZNetScene not ready"); return; }
+                var rows = new List<string>();
+                foreach (var pf in zs.m_prefabs)
+                {
+                    if (pf == null) continue;
+                    var ch = pf.GetComponent<Character>();
+                    if (ch == null || ch is Player) continue;
+                    float hp = Traverse.Create(ch).Field("m_health").GetValue<float>();
+                    var fac = Traverse.Create(ch).Field("m_faction").GetValue<Character.Faction>();
+                    bool boss = Traverse.Create(ch).Field("m_boss").GetValue<bool>();
+                    rows.Add($"{hp,7:0}  {fac,-12} {(boss ? "BOSS " : "     ")}{pf.name}");
+                }
+                rows.Sort((a, b) => float.Parse(a.Substring(0, 7)).CompareTo(float.Parse(b.Substring(0, 7))));
+                string outPath = Path.Combine(Paths.ConfigPath, "pilgrim_enemy_hp.txt");
+                File.WriteAllText(outPath, "  HP   faction      name\n----------------------------------------\n" + string.Join("\n", rows));
+                args.Context.AddString($"{rows.Count} creatures → {outPath}");
+                Log.LogInfo($"[Pilgrim] enemy hp dump ({rows.Count}) → {outPath}");
+            });
+
             new Terminal.ConsoleCommand("pilgrim_whichpanel", "find the panel sprite hosting the trophies/achievements buttons", args =>
             {
                 // locate the buttons by name, then walk ancestors for the first sliced-panel Image
@@ -7656,10 +7678,12 @@ namespace EnvReporter
     public class BoonsConfig
     {
         public bool   Enabled           { get; set; } = true;
-        public int    XpPerKill         { get; set; } = 10;
+        public int    XpPerKill         { get; set; } = 10;    // baseline XP for an enemy with XpHealthRef max health
+        public float  XpHealthRef       { get; set; } = 40f;   // reference max-health (≈ greydwarf); XP scales with maxHP / this
+        // level curve: XP to go L→L+1 = XpCurveBase × XpCurveGrowth^L. Growth>1 keeps time-per-level regular as income rises.
+        public float  XpCurveBase       { get; set; } = 20f;
+        public float  XpCurveGrowth     { get; set; } = 1.05f;
         public int    DrawCount         { get; set; } = 3;
-        public float  TakeChance        { get; set; } = 0.60f;
-        public float  PristineOdds      { get; set; } = 0.08f;
         public int    Rerolls           { get; set; } = 1;
         public string LevelUpVfx        { get; set; } = "fx_frozenking_aspectspawn density=3; sfx_dverger_heal_start; sfx_dverger_heal_finish delay=1.5";
         public float  LevelUpVfxDensity { get; set; } = 1.5f;

@@ -39,9 +39,8 @@ namespace EnvReporter
 
         internal static bool   Enabled           => C.Enabled;
         internal static int    XpPerKill         => C.XpPerKill;
+        internal static float  XpHealthRef       => C.XpHealthRef;
         internal static int    DrawCount         => C.DrawCount;
-        internal static float  TakeChance        => C.TakeChance;
-        internal static float  PristineOdds      => C.PristineOdds;
         internal static int    Rerolls           => C.Rerolls;
         internal static string LevelUpVfx        => C.LevelUpVfx;
         internal static float  LevelUpVfxDensity => C.LevelUpVfxDensity;
@@ -72,8 +71,9 @@ namespace EnvReporter
             KeystoneId.Nostalgia => C.NostalgiaEnabled,
             _ => true,
         };
-        // xp to go from level L -> L+1  (i.e. "level n from n-1 costs 10n")
-        internal static int NeedForNext(int level) => 10 * (level + 1);
+        // xp to go from level L -> L+1 (gentle exponential so leveling stays regular as per-kill XP grows with biome)
+        internal static int NeedForNext(int level) =>
+            Mathf.Max(1, Mathf.RoundToInt(C.XpCurveBase * Mathf.Pow(C.XpCurveGrowth, level)));
     }
 
     // ---- legendaries: "keystones" (the Unique tier). Each is a named on/off effect with its own Harmony hook. ----
@@ -93,7 +93,7 @@ namespace EnvReporter
             [KeystoneId.Dread]   = new KeystoneDef { Id = KeystoneId.Dread,   Name = "Dread",   Desc = "You are the premonition of danger",  Sheet = "You are granted sneak +30" },
             [KeystoneId.Avarice] = new KeystoneDef { Id = KeystoneId.Avarice, Name = "Avarice", Desc = "You are the hand in every pocket",    Sheet = "You are granted 3x treasure" },
             [KeystoneId.Regret]  = new KeystoneDef { Id = KeystoneId.Regret,  Name = "Regret",  Desc = "You'll bear anything but the weight of what you did", Sheet = "You are granted 2x carrying weight" },
-            [KeystoneId.Resent]  = new KeystoneDef { Id = KeystoneId.Resent,  Name = "Resent",  Desc = "You lash out and don't remember why anymore", Sheet = "Unblocked damage reflects to the attacker" },
+            [KeystoneId.Resent]  = new KeystoneDef { Id = KeystoneId.Resent,  Name = "Resent",  Desc = "You lash out and don't remember why anymore", Sheet = "Excess block force is reflected to the attacker" },
             [KeystoneId.Wrath]    = new KeystoneDef { Id = KeystoneId.Wrath,    Name = "Wrath",    Desc = "Your anger shall not be mitigated",  Sheet = "You deal 2x slash damage" },
             [KeystoneId.Betrayal] = new KeystoneDef { Id = KeystoneId.Betrayal, Name = "Betrayal", Desc = "You let them put their trust in you", Sheet = "You deal 10x backstab damage with knives" },
             [KeystoneId.Panic]     = new KeystoneDef { Id = KeystoneId.Panic,     Name = "Panic",     Desc = "Your hands tremble with intent",      Sheet = "Drawing your bow takes 25% as long as normal" },
@@ -204,14 +204,8 @@ namespace EnvReporter
     {
         static readonly System.Random Rng = new System.Random();
 
-        // One magnitude roll: an int on 0–10. Identical rule for first roll AND rerolls (same code path).
-        // PristineOdds bumps the roll into the top band (a lucky high roll), applied every time.
-        static int Roll010()
-        {
-            double r = Rng.NextDouble();
-            if (Rng.NextDouble() < BoonCfg.PristineOdds) r = 0.85 + 0.15 * Rng.NextDouble();
-            return (int)Math.Round(r * 10.0);
-        }
+        // One magnitude roll: a uniform int on 0–10. Same rule for first roll and rerolls.
+        static int Roll010() => (int)Math.Round(Rng.NextDouble() * 10.0);
 
         internal static Boon Roll(bool rare)
         {
@@ -222,11 +216,16 @@ namespace EnvReporter
 
             int give = Roll010();
             int take = Roll010();
-            if (take > give) give = Math.Min(10, take + 1);   // clamp in the player's favor: gift always beats the cost
-            give = Math.Max(1, give);                          // a 0/0 roll still grants a give of 1 (weak pure boon), never a no-op
-
-            // give and take rolled the SAME axis → they cancel into one net gift: a pure boon of (give − take), min 1
-            if (b.GiveAxis == b.TakeAxis) { give = Math.Max(1, give - take); take = 0; }
+            if (b.GiveAxis == b.TakeAxis)
+            {
+                // same axis: give & take would cancel → collapse to a net gift of at least 1 (clamp in player's favor)
+                give = Math.Max(1, give - take); take = 0;
+            }
+            else
+            {
+                // different axes: allow a "gamble" where the cost can exceed the gift (some boons just suck); ensure give ≥ 1
+                give = Math.Max(1, give);
+            }
 
             b.GiveAmt = give;
             b.TakeAmt = take;
@@ -442,7 +441,10 @@ namespace EnvReporter
 
             var st = BoonHud.State;
             if (st == null) return;
-            int xp = BoonCfg.XpPerKill;
+            // scale by enemy max health (vs a reference) and star level (×1 base, ×2 one-star, ×3 two-star)
+            float href = Mathf.Max(1f, BoonCfg.XpHealthRef);
+            int star = Mathf.Max(1, __instance.GetLevel());
+            int xp = Mathf.Max(1, Mathf.RoundToInt(BoonCfg.XpPerKill * (__instance.GetMaxHealth() / href) * star));
             if (BoonHud.Owns(KeystoneId.Sonder)) xp *= 3;   // Sonder: triple experience
             st.AddXp(xp);
             st.Save(local);
@@ -592,19 +594,23 @@ namespace EnvReporter
         }
     }
 
-    // Resent — "You lash out and don't remember why anymore." After blocking, the leftover (unblocked) damage is
-    // dealt back to the attacker. BlockAttack runs on the blocker's own client (via RPC_Damage on the player's owner),
-    // so this is MP-correct and the reflected hit is attributed to the player like any attack.
+    // Resent — "You lash out and don't remember why anymore." When your block force EXCEEDS the incoming hit, the
+    // surplus (blockForce − hit) is dealt back to the attacker. Prefix (before BlockAttack reduces the hit) so we see
+    // the incoming blockable damage. BlockAttack runs on the blocker's own client → MP-correct.
     [HarmonyPatch(typeof(Humanoid), "BlockAttack")]
     internal static class Resent_Reflect
     {
-        static void Postfix(Humanoid __instance, HitData hit, Character attacker)
+        static void Prefix(Humanoid __instance, HitData hit, Character attacker)
         {
             if (!BoonCfg.Enabled || __instance == null || __instance != Player.m_localPlayer) return;
             if (!BoonHud.Owns(KeystoneId.Resent) || attacker == null || hit == null || attacker == __instance) return;
-            float leftover = hit.GetTotalDamage();     // what still gets through after the block reduction
-            if (leftover <= 0f) return;
-            var rh = new HitData { m_damage = hit.m_damage.Clone() };
+            var blocker = Traverse.Create(__instance).Method("GetCurrentBlocker").GetValue<ItemDrop.ItemData>();
+            if (blocker == null) return;
+            float blockForce = blocker.GetBlockPower(__instance.GetSkillFactor(Skills.SkillType.Blocking));
+            float excess = blockForce - hit.GetTotalBlockableDamage();   // how much your block overshot the hit
+            if (excess <= 0f) return;                                    // block didn't exceed the hit → nothing reflected
+            var rh = new HitData();
+            rh.m_damage.m_blunt = excess;
             rh.m_point = attacker.transform.position;
             rh.m_dir = (attacker.transform.position - __instance.transform.position).normalized;
             rh.SetAttacker(__instance);
