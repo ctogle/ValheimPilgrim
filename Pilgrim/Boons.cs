@@ -109,7 +109,8 @@ namespace EnvReporter
         Damage, AtkStamina, MoveSpeed, HpRegen, StamRegen, Block, RunStamina, JumpStamina,
         BlockStamina, DodgeStamina, SwimStamina, SneakStamina, Stagger, FallDamage,
         ArmorPct, Parry, EitrRegen, SwimSpeed, Stealth, CarryWeight,
-        BuildStamina, StaminaUse   // BuildStamina = hoe/hammer/cultivator; StaminaUse = GENERAL umbrella over all 8 leaves
+        BuildStamina, StaminaUse,  // BuildStamina = hoe/hammer/cultivator; StaminaUse = GENERAL umbrella over all 8 leaves
+        Defense                    // GENERAL umbrella over armor% + parry + stagger + fall damage
     }
 
     internal sealed class AxisDef
@@ -149,6 +150,7 @@ namespace EnvReporter
             [BoonAxis.CarryWeight] = new AxisDef { GiveAdj="Mighty",    GiveNoun="the Ox",     TakeAdj="Overladen",  TakeNoun="the Load",   Noun="carry weight",  Percent=false },
             [BoonAxis.BuildStamina]= new AxisDef { GiveAdj="Industrious",GiveNoun="the Craft",TakeAdj="Toilsome",   TakeNoun="the Labor",  Noun="build stamina use",Percent=true, Cost=true },
             [BoonAxis.StaminaUse]  = new AxisDef { GiveAdj="Fluid",     GiveNoun="Grace",      TakeAdj="Labored",    TakeNoun="Toil",       Noun="stamina use",   Percent=true, Cost=true, General=true },
+            [BoonAxis.Defense]     = new AxisDef { GiveAdj="Stalwart",  GiveNoun="the Wall",   TakeAdj="Vulnerable", TakeNoun="the Breach", Noun="defense",       Percent=true, General=true },
         };
         internal static readonly BoonAxis[] All = (BoonAxis[])Enum.GetValues(typeof(BoonAxis));
     }
@@ -399,11 +401,13 @@ namespace EnvReporter
             active.m_swimStaminaUseModifier     = -((t[BoonAxis.SwimStamina]  + gStam) / 100f);
             active.m_sneakStaminaUseModifier    = -((t[BoonAxis.SneakStamina] + gStam) / 100f);
             active.m_homeItemStaminaUseModifier = -((t[BoonAxis.BuildStamina] + gStam) / 100f);
-            // defense / utility
-            active.m_staggerModifier          = -(t[BoonAxis.Stagger]      / 100f);  // negative = less stagger taken
-            active.m_fallDamageModifier       = -(t[BoonAxis.FallDamage]   / 100f);  // negative = less fall damage
-            active.m_armorMultiplier          =  t[BoonAxis.ArmorPct]      / 100f;   // neutral 0 → ×(1+x)
-            active.m_timedBlockBonus          =  t[BoonAxis.Parry]         / 100f;   // neutral 0 → parry ×(1+x)
+            // defense: the GENERAL "Defense" umbrella adds to armor% + parry (+) and stagger + fall (−)
+            float gDef = t[BoonAxis.Defense];
+            active.m_staggerModifier          = -((t[BoonAxis.Stagger]    + gDef) / 100f);  // negative = less stagger taken
+            active.m_fallDamageModifier       = -((t[BoonAxis.FallDamage] + gDef) / 100f);  // negative = less fall damage
+            active.m_armorMultiplier          =  (t[BoonAxis.ArmorPct]    + gDef) / 100f;   // neutral 0 → ×(1+x)
+            active.m_timedBlockBonus          =  (t[BoonAxis.Parry]       + gDef) / 100f;   // neutral 0 → parry ×(1+x)
+            // utility
             active.m_eitrRegenMultiplier      = 1f + t[BoonAxis.EitrRegen] / 100f;
             active.m_swimSpeedModifier        =  t[BoonAxis.SwimSpeed]     / 100f;
             active.m_stealthModifier          =  t[BoonAxis.Stealth]       / 100f;   // higher = stealthier
