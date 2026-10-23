@@ -55,6 +55,7 @@ namespace EnvReporter
         internal static float  XpBarNudgeY       => C.XpBarNudgeY;
         internal static float LegendaryChance => C.LegendaryChance;
         internal static float RareChance => C.RareChance;
+        internal static float ResistChance => C.ResistChance;
         internal static bool LegendaryEnabled(KeystoneId id) => id switch
         {
             KeystoneId.Grief => C.GriefEnabled,
@@ -110,7 +111,8 @@ namespace EnvReporter
         BlockStamina, DodgeStamina, SwimStamina, SneakStamina, Stagger, FallDamage,
         ArmorPct, Parry, EitrRegen, SwimSpeed, Stealth, CarryWeight,
         BuildStamina, StaminaUse,  // BuildStamina = hoe/hammer/cultivator; StaminaUse = GENERAL umbrella over all 8 leaves
-        Defense                    // GENERAL umbrella over armor% + parry + stagger + fall damage
+        Defense,                   // GENERAL umbrella over armor% + parry + stagger + fall damage
+        ResBlunt, ResSlash, ResPierce, ResFire, ResFrost, ResPoison, ResLightning, ResSpirit  // per-type resistance (categorical)
     }
 
     internal sealed class AxisDef
@@ -121,6 +123,8 @@ namespace EnvReporter
         public bool Percent;             // display/semantics as % (else flat)
         public bool Cost;                // "cost" axis: a GIFT reduces the stat (shown as −), a COST raises it (+)
         public bool General;             // umbrella axis over a domain's leaves → rarity-floored (can't roll Common)
+        public bool Categorical;         // per-type resistance: amount maps to a DamageModifier category, not a %
+        public HitData.DamageType DType; // the damage type for a categorical (resistance) axis
     }
 
     internal static class Axes
@@ -151,8 +155,48 @@ namespace EnvReporter
             [BoonAxis.BuildStamina]= new AxisDef { GiveAdj="Industrious",GiveNoun="the Craft",TakeAdj="Toilsome",   TakeNoun="the Labor",  Noun="build stamina use",Percent=true, Cost=true },
             [BoonAxis.StaminaUse]  = new AxisDef { GiveAdj="Fluid",     GiveNoun="Grace",      TakeAdj="Labored",    TakeNoun="Toil",       Noun="stamina use",   Percent=true, Cost=true, General=true },
             [BoonAxis.Defense]     = new AxisDef { GiveAdj="Stalwart",  GiveNoun="the Wall",   TakeAdj="Vulnerable", TakeNoun="the Breach", Noun="defense",       Percent=true, General=true },
+            // per-type resistance (categorical): give = resist that type, take = weak to it. A bet on incoming damage.
+            [BoonAxis.ResBlunt]    = new AxisDef { GiveAdj="Padded",    GiveNoun="the Cushion",TakeAdj="Bruised",    TakeNoun="the Bruise", Noun="blunt",     Categorical=true, DType=HitData.DamageType.Blunt },
+            [BoonAxis.ResSlash]    = new AxisDef { GiveAdj="Toughhide", GiveNoun="the Hide",   TakeAdj="Lacerated",  TakeNoun="the Gash",   Noun="slash",     Categorical=true, DType=HitData.DamageType.Slash },
+            [BoonAxis.ResPierce]   = new AxisDef { GiveAdj="Plated",    GiveNoun="the Plate",  TakeAdj="Punctured",  TakeNoun="the Puncture",Noun="pierce",   Categorical=true, DType=HitData.DamageType.Pierce },
+            [BoonAxis.ResFire]     = new AxisDef { GiveAdj="Fireproof", GiveNoun="the Ember",  TakeAdj="Scorched",   TakeNoun="the Pyre",   Noun="fire",      Categorical=true, DType=HitData.DamageType.Fire },
+            [BoonAxis.ResFrost]    = new AxisDef { GiveAdj="Frostward", GiveNoun="the Thaw",   TakeAdj="Chilled",    TakeNoun="the Frost",  Noun="frost",     Categorical=true, DType=HitData.DamageType.Frost },
+            [BoonAxis.ResPoison]   = new AxisDef { GiveAdj="Purified",  GiveNoun="the Antidote",TakeAdj="Envenomed", TakeNoun="the Venom",  Noun="poison",    Categorical=true, DType=HitData.DamageType.Poison },
+            [BoonAxis.ResLightning]= new AxisDef { GiveAdj="Grounded",  GiveNoun="the Earth",  TakeAdj="Shocked",    TakeNoun="the Storm",  Noun="lightning", Categorical=true, DType=HitData.DamageType.Lightning },
+            [BoonAxis.ResSpirit]   = new AxisDef { GiveAdj="Hallowed",  GiveNoun="the Ward",   TakeAdj="Haunted",    TakeNoun="the Specter",Noun="spirit",    Categorical=true, DType=HitData.DamageType.Spirit },
         };
         internal static readonly BoonAxis[] All = (BoonAxis[])Enum.GetValues(typeof(BoonAxis));
+
+        // the leaves each general umbrella feeds (used by Apply and by the character-sheet breakout)
+        internal static readonly HashSet<BoonAxis> DefenseParts = new()
+        { BoonAxis.ArmorPct, BoonAxis.Parry, BoonAxis.Stagger, BoonAxis.FallDamage };
+
+        // numeric give/take/give2 draw from here (EXCLUDES the categorical resistance axes — those only come
+        // from the dedicated resistance branch, always paired resist/weak).
+        internal static readonly BoonAxis[] NumericAxes = All.Where(a => !Def[a].Categorical).ToArray();
+
+        // the 8 per-type resistance axes
+        internal static readonly BoonAxis[] ResistAxes =
+        {
+            BoonAxis.ResBlunt, BoonAxis.ResSlash, BoonAxis.ResPierce, BoonAxis.ResFire,
+            BoonAxis.ResFrost, BoonAxis.ResPoison, BoonAxis.ResLightning, BoonAxis.ResSpirit,
+        };
+
+        // net points → damage category (give/positive = resist ladder, take/negative = weak ladder)
+        internal static HitData.DamageModifier Category(int net) =>
+            net >= 10 ? HitData.DamageModifier.Immune
+          : net >= 7  ? HitData.DamageModifier.VeryResistant
+          : net >= 4  ? HitData.DamageModifier.Resistant
+          : net >= 1  ? HitData.DamageModifier.SlightlyResistant
+          : net <= -7 ? HitData.DamageModifier.VeryWeak
+          : net <= -4 ? HitData.DamageModifier.Weak
+          : net <= -1 ? HitData.DamageModifier.SlightlyWeak
+          :             HitData.DamageModifier.Normal;
+
+        // human text for a category net (positive = resist, negative = weak)
+        internal static string CatText(int net) =>
+            net >= 10 ? "Immune" : net >= 7 ? "Very resistant" : net >= 4 ? "Resistant" : net >= 1 ? "Slightly resistant"
+          : net <= -7 ? "Very weak" : net <= -4 ? "Weak" : net <= -1 ? "Slightly weak" : "";
     }
 
     // ---- one rolled boon -----------------------------------------------------
@@ -181,6 +225,8 @@ namespace EnvReporter
         static string Line(BoonAxis ax, int amt, bool give)
         {
             var d = Axes.Def[ax];
+            if (d.Categorical)   // resistance: give = resist ladder, take = weak ladder
+                return $"{Axes.CatText(give ? amt : -amt)} to {d.Noun}";
             string sign = (give ^ d.Cost) ? "+" : "-";   // cost axis: a gift REDUCES the stat (shown −)
             string unit = d.Percent ? "%" : "";
             return $"{sign}{amt}{unit} {d.Noun}";
@@ -217,8 +263,8 @@ namespace EnvReporter
         {
             var b = new Boon();
             // give and take axes rolled independently → P(same axis) = (1/6)², intuitive and uncoerced
-            b.GiveAxis = Axes.All[Rng.Next(Axes.All.Length)];
-            b.TakeAxis = Axes.All[Rng.Next(Axes.All.Length)];
+            b.GiveAxis = Axes.NumericAxes[Rng.Next(Axes.NumericAxes.Length)];
+            b.TakeAxis = Axes.NumericAxes[Rng.Next(Axes.NumericAxes.Length)];
 
             int give = Roll010();
             int take = Roll010();
@@ -242,7 +288,7 @@ namespace EnvReporter
                 // rare: a SECOND gift (2 gives + 1 take); a lucky 0 take → 2 gives, no cost
                 b.Rarity = 2;
                 b.HasGive2 = true;
-                b.Give2Axis = Axes.All[Rng.Next(Axes.All.Length)];
+                b.Give2Axis = Axes.NumericAxes[Rng.Next(Axes.NumericAxes.Length)];
                 b.Give2Amt = Math.Max(1, Roll010());
             }
             else
@@ -253,6 +299,21 @@ namespace EnvReporter
                 // a GENERAL (umbrella) gift is broadly useful → rarity signal: it can't roll Common
                 if (Axes.Def[b.GiveAxis].General) b.Rarity = Math.Max(b.Rarity, 1);
             }
+            return b;
+        }
+
+        // A per-type resistance boon: give = resist one damage type, take = weak to a different one (a bet on incoming damage).
+        static Boon RollResist()
+        {
+            var b = new Boon();
+            var types = Axes.ResistAxes;
+            b.GiveAxis = types[Rng.Next(types.Length)];
+            do { b.TakeAxis = types[Rng.Next(types.Length)]; } while (b.TakeAxis == b.GiveAxis);
+            int give = Math.Max(1, Roll010());   // always at least slightly resistant
+            int take = Roll010();
+            b.GiveAmt = give; b.TakeAmt = take; b.HasTake = take > 0;
+            float score = give - 0.5f * take + (b.HasTake ? 0f : 1.5f);
+            b.Rarity = score >= 8f ? 2 : score >= 5f ? 1 : 0;
             return b;
         }
 
@@ -279,8 +340,10 @@ namespace EnvReporter
             {
                 Boon b = null;
                 double r = Rng.NextDouble();
-                if (r < BoonCfg.LegendaryChance) b = RollKeystone(owned, offeredKeys);        // Unique
-                else if (r < BoonCfg.LegendaryChance + BoonCfg.RareChance) b = Roll(true);     // Rare (2 gives)
+                double cLeg = BoonCfg.LegendaryChance, cRare = cLeg + BoonCfg.RareChance, cRes = cRare + BoonCfg.ResistChance;
+                if (r < cLeg)       b = RollKeystone(owned, offeredKeys);   // Unique
+                else if (r < cRare) b = Roll(true);                        // Rare (2 gives)
+                else if (r < cRes)  b = RollResist();                      // per-type resistance (resist X / weak Y)
                 if (b == null) b = Roll(false);   // remainder (or keystone pool exhausted) → common/uncommon
 
                 if (b.IsKeystone) { if (offeredKeys.Add(b.Keystone)) list.Add(b); }
@@ -424,6 +487,16 @@ namespace EnvReporter
             var pdm = default(HitData.DamageTypes);
             if (st.HasKeystone(KeystoneId.Wrath)) pdm.m_slash = 1f;
             active.m_percentigeDamageModifiers = pdm;
+
+            // per-type resistance (categorical): net points per type → DamageModifier category
+            var mods = new List<HitData.DamageModPair>();
+            foreach (var ra in Axes.ResistAxes)
+            {
+                var cat = Axes.Category(t[ra]);
+                if (cat != HitData.DamageModifier.Normal)
+                    mods.Add(new HitData.DamageModPair { m_type = Axes.Def[ra].DType, m_modifier = cat });
+            }
+            active.m_mods = mods;
         }
 
         // Live boon SE (the clone SEMan holds) — used by the character sheet to measure deltas.

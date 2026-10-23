@@ -7774,6 +7774,7 @@ namespace EnvReporter
         // --- legendaries (Unique tier) ---
         public float  LegendaryChance   { get; set; } = 0.20f;   // per card slot: chance to roll a keystone instead of a give/take boon
         public float  RareChance        { get; set; } = 0.20f;   // per card slot: chance for a rare (2 gives + 1 take); remainder is common/uncommon
+        public float  ResistChance      { get; set; } = 0.15f;   // per card slot: chance for a per-type resistance boon (resist X / weak Y)
         public bool   GriefEnabled      { get; set; } = true;    // "The wounds you inflict cannot be healed."
         public bool   GraceEnabled      { get; set; } = true;    // "A mortal blow leaves you at 1 HP, once per minute."
         public bool   ConvictionEnabled { get; set; } = true;    // "You cannot be staggered when blocking with a shield."
