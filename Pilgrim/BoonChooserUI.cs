@@ -40,7 +40,7 @@ namespace EnvReporter
         Button _rerollBtn;
         TextMeshProUGUI _rerollLabel;
 
-        class BoonBtn { public Button btn; public Image bg; public Image hi; public Image halo; public Image[] border; public TextMeshProUGUI rarity, name, give, give2, take; }
+        class BoonBtn { public Button btn; public Image bg; public Image hi; public Image halo; public Image[] border; public TextMeshProUGUI rarity, name; public TextMeshProUGUI[] lines; }
         readonly BoonBtn[] _boons = new BoonBtn[3];
 
         void BuildUI()
@@ -142,9 +142,8 @@ namespace EnvReporter
             card.rarity = Child(b.transform, 20, 62f, false);
             card.name = Child(b.transform, 24, 26f, false); card.name.enableWordWrapping = true; card.name.fontStyle = FontStyles.Bold;
             card.name.outlineColor = Color.black; card.name.outlineWidth = 0.25f;   // white text, black lining
-            card.give = Child(b.transform, 19, -18f, true);
-            card.give2 = Child(b.transform, 19, -34f, true);
-            card.take = Child(b.transform, 19, -46f, true);
+            card.lines = new TextMeshProUGUI[4];
+            for (int k = 0; k < 4; k++) card.lines[k] = Child(b.transform, 19, -18f - k * 16f, true);
             return card;
         }
 
@@ -225,28 +224,33 @@ namespace EnvReporter
                 var col = RarityCol[r];
                 c.rarity.text = RarityName[r].ToUpper(); c.rarity.color = col;   // rarity shown by label + border
                 c.name.text = b.Name; c.name.color = Color.white;                // white text with black outline
-                var gr = c.give.rectTransform;
+                var l0 = c.lines[0]; var gr = l0.rectTransform;
                 if (b.IsKeystone)
                 {
                     // keystone: flowery desc wrapped, aligned to the give/take band, in the unique colour
-                    c.give.gameObject.SetActive(true); c.give.text = b.Desc; c.give.color = col;
-                    c.give.enableWordWrapping = true; c.give.alignment = TextAlignmentOptions.Top; c.give.outlineWidth = 0f;
+                    l0.gameObject.SetActive(true); l0.text = b.Desc; l0.color = col;
+                    l0.enableWordWrapping = true; l0.alignment = TextAlignmentOptions.Top; l0.outlineWidth = 0f;
                     gr.pivot = new Vector2(0.5f, 1f); gr.sizeDelta = new Vector2(BW - 24, 72); gr.anchoredPosition = new Vector2(0, -4);
-                    c.give2.gameObject.SetActive(false);
-                    c.take.gameObject.SetActive(false);
+                    for (int k = 1; k < c.lines.Length; k++) c.lines[k].gameObject.SetActive(false);
                 }
                 else
                 {
-                    // 1–2 give lines (green) + optional take (red), centred as a block in the give/take band
-                    // first give sits at a FIXED y (aligned across all cards); extra lines stack below
-                    c.give.enableWordWrapping = false; c.give.alignment = TextAlignmentOptions.Center; c.give.outlineWidth = 0f;
-                    gr.pivot = new Vector2(0.5f, 0.5f); gr.sizeDelta = new Vector2(BW - 18, 29);
-                    const float GY = -18f, SP = 24f; float y = GY;
-                    c.give.gameObject.SetActive(true); c.give.text = b.GiveText; c.give.color = UiKit.Give; gr.anchoredPosition = new Vector2(0, y); y -= SP;
-                    if (b.HasGive2) { var r2 = c.give2.rectTransform; r2.sizeDelta = new Vector2(BW - 18, 29); c.give2.gameObject.SetActive(true); c.give2.text = b.Give2Text; c.give2.color = UiKit.Give; r2.anchoredPosition = new Vector2(0, y); y -= SP; }
-                    else c.give2.gameObject.SetActive(false);
-                    if (b.HasTake) { var rt2 = c.take.rectTransform; rt2.sizeDelta = new Vector2(BW - 18, 29); c.take.gameObject.SetActive(true); c.take.text = b.TakeText; c.take.color = UiKit.Take; rt2.anchoredPosition = new Vector2(0, y); }
-                    else c.take.gameObject.SetActive(false);
+                    // up to 4 attribute lines (green give / red take), stacked as a centred block
+                    // first line sits at a FIXED y (aligned across all cards); extra lines stack below
+                    const float GY = -18f, SP = 22f; float y = GY;
+                    int n = b.Rolls.Count;
+                    for (int k = 0; k < c.lines.Length; k++)
+                    {
+                        var ln = c.lines[k];
+                        if (k >= n) { ln.gameObject.SetActive(false); continue; }
+                        var r2 = ln.rectTransform;
+                        ln.enableWordWrapping = false; ln.alignment = TextAlignmentOptions.Center; ln.outlineWidth = 0f;
+                        r2.pivot = new Vector2(0.5f, 0.5f); r2.sizeDelta = new Vector2(BW - 18, 23);
+                        ln.gameObject.SetActive(true);
+                        ln.text = Boon.Line(b.Rolls[k]);
+                        ln.color = b.Rolls[k].Net > 0 ? UiKit.Give : UiKit.Take;
+                        r2.anchoredPosition = new Vector2(0, y); y -= SP;
+                    }
                 }
                 // hover: flat darken veil + a pulsing rarity-coloured halo behind the card; others untouched
                 bool hovered = _hoverIdx == i;

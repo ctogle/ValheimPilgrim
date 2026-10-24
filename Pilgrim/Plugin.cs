@@ -7773,8 +7773,16 @@ namespace EnvReporter
         public float  SheetPanelZoom    { get; set; } = 1.5f;
         // --- legendaries (Unique tier) ---
         public float  LegendaryChance   { get; set; } = 0.20f;   // per card slot: chance to roll a keystone instead of a give/take boon
-        public float  RareChance        { get; set; } = 0.20f;   // per card slot: chance for a rare (2 gives + 1 take); remainder is common/uncommon
-        public float  ResistChance      { get; set; } = 0.15f;   // per card slot: chance for a per-type resistance boon (resist X / weak Y)
+        public float  AttrW1            { get; set; } = 40f;     // numeric boon: relative weight to roll 1 attribute
+        public float  AttrW2            { get; set; } = 30f;     // ...2 attributes
+        public float  AttrW3            { get; set; } = 20f;     // ...3 attributes
+        public float  AttrW4            { get; set; } = 10f;     // ...4 attributes
+        // axis roll-weight buckets (relative; baseline = 1). Generals are rare because any general forces Rare rarity.
+        public float  WeightGeneral     { get; set; } = 0.3f;    // Damage, Defense, StaminaUse, Survival
+        public float  WeightResist      { get; set; } = 0.5f;    // the 8 per-type resistances
+        public float  WeightDmgType     { get; set; } = 0.7f;    // the 8 per-type outgoing-damage leaves
+        public float  WeightStamLeaf    { get; set; } = 0.7f;    // the 8 stamina-use leaves
+        public float  WeightBase        { get; set; } = 1.0f;    // everything else
         public bool   GriefEnabled      { get; set; } = true;    // "The wounds you inflict cannot be healed."
         public bool   GraceEnabled      { get; set; } = true;    // "A mortal blow leaves you at 1 HP, once per minute."
         public bool   ConvictionEnabled { get; set; } = true;    // "You cannot be staggered when blocking with a shield."
@@ -7787,6 +7795,10 @@ namespace EnvReporter
         public bool   BetrayalEnabled   { get; set; } = true;    // "You deal 10x backstab damage with knives."
         public bool   PanicEnabled      { get; set; } = true;    // "Drawing your bow takes 25% as long as normal."
         public bool   NostalgiaEnabled  { get; set; } = true;    // "Foods last 20% longer."
+        public bool   TemerityEnabled   { get; set; } = true;    // "You deal 2x blunt damage."
+        public bool   ContemptEnabled   { get; set; } = true;    // "You deal 2x pierce damage."
+        public bool   PyrrhicEnabled    { get; set; } = true;    // "Grants favorable boon rolls."
+        public float  PyrrhicBaseFactor { get; set; } = 0.3f;    // Pyrrhic multiplies the baseline axis weight by this (lower = stronger rolls)
     }
 
     public class PilgrimConfig

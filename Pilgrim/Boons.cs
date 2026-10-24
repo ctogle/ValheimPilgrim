@@ -54,8 +54,16 @@ namespace EnvReporter
         internal static float  XpBarNudgeX       => C.XpBarNudgeX;
         internal static float  XpBarNudgeY       => C.XpBarNudgeY;
         internal static float LegendaryChance => C.LegendaryChance;
-        internal static float RareChance => C.RareChance;
-        internal static float ResistChance => C.ResistChance;
+        internal static float AttrW1 => C.AttrW1;
+        internal static float AttrW2 => C.AttrW2;
+        internal static float AttrW3 => C.AttrW3;
+        internal static float AttrW4 => C.AttrW4;
+        internal static float WeightGeneral  => C.WeightGeneral;
+        internal static float WeightResist   => C.WeightResist;
+        internal static float WeightDmgType  => C.WeightDmgType;
+        internal static float WeightStamLeaf => C.WeightStamLeaf;
+        internal static float WeightBase     => C.WeightBase;
+        internal static float PyrrhicBaseFactor => C.PyrrhicBaseFactor;
         internal static bool LegendaryEnabled(KeystoneId id) => id switch
         {
             KeystoneId.Grief => C.GriefEnabled,
@@ -70,6 +78,9 @@ namespace EnvReporter
             KeystoneId.Betrayal => C.BetrayalEnabled,
             KeystoneId.Panic => C.PanicEnabled,
             KeystoneId.Nostalgia => C.NostalgiaEnabled,
+            KeystoneId.Temerity => C.TemerityEnabled,
+            KeystoneId.Contempt => C.ContemptEnabled,
+            KeystoneId.Pyrrhic => C.PyrrhicEnabled,
             _ => true,
         };
         // xp to go from level L -> L+1 (gentle exponential so leveling stays regular as per-kill XP grows with biome)
@@ -78,7 +89,7 @@ namespace EnvReporter
     }
 
     // ---- legendaries: "keystones" (the Unique tier). Each is a named on/off effect with its own Harmony hook. ----
-    internal enum KeystoneId { None = 0, Grief = 1, Grace = 2, Conviction = 3, Sonder = 4, Dread = 5, Avarice = 6, Regret = 7, Resent = 8, Wrath = 9, Betrayal = 10, Panic = 11, Nostalgia = 12 }   // append new ids at the END (persisted)
+    internal enum KeystoneId { None = 0, Grief = 1, Grace = 2, Conviction = 3, Sonder = 4, Dread = 5, Avarice = 6, Regret = 7, Resent = 8, Wrath = 9, Betrayal = 10, Panic = 11, Nostalgia = 12, Temerity = 13, Contempt = 14, Pyrrhic = 15 }   // append new ids at the END (persisted)
 
     // Desc = flowery card text; Sheet = plain effect text for the character sheet.
     internal sealed class KeystoneDef { public KeystoneId Id; public string Name, Desc, Sheet; }
@@ -99,6 +110,9 @@ namespace EnvReporter
             [KeystoneId.Betrayal] = new KeystoneDef { Id = KeystoneId.Betrayal, Name = "Betrayal", Desc = "You let them put their trust in you", Sheet = "Grants 10x backstab damage with knives" },
             [KeystoneId.Panic]     = new KeystoneDef { Id = KeystoneId.Panic,     Name = "Panic",     Desc = "Your hands tremble with intent",      Sheet = "Bow draws in 25% the time" },
             [KeystoneId.Nostalgia] = new KeystoneDef { Id = KeystoneId.Nostalgia, Name = "Nostalgia", Desc = "You long for the fellowship of youth", Sheet = "Foods last 20% longer" },
+            [KeystoneId.Temerity]  = new KeystoneDef { Id = KeystoneId.Temerity,  Name = "Temerity",  Desc = "You ignore the warnings of danger",     Sheet = "Grants 2x blunt damage" },
+            [KeystoneId.Contempt]  = new KeystoneDef { Id = KeystoneId.Contempt,  Name = "Contempt",  Desc = "Your voice is hatred transcending diction", Sheet = "Grants 2x pierce damage" },
+            [KeystoneId.Pyrrhic]   = new KeystoneDef { Id = KeystoneId.Pyrrhic,   Name = "Pyrrhic",   Desc = "You'll stand at the table while blood fills your shoes", Sheet = "Grants favorable boon rolls" },
         };
         internal static readonly KeystoneId[] All = Def.Keys.ToArray();
         internal static bool Available(KeystoneId id) => Def.ContainsKey(id) && BoonCfg.LegendaryEnabled(id);
@@ -107,12 +121,27 @@ namespace EnvReporter
     // Append new axes at the END — the int value is persisted in saved boons, so existing indices must not shift.
     internal enum BoonAxis
     {
-        Damage, AtkStamina, MoveSpeed, HpRegen, StamRegen, Block, RunStamina, JumpStamina,
+        Damage, AtkStamina, MoveSpeed, HpRegen, StamRegen, FlatArmor, RunStamina, JumpStamina,
         BlockStamina, DodgeStamina, SwimStamina, SneakStamina, Stagger, FallDamage,
         ArmorPct, Parry, EitrRegen, SwimSpeed, Stealth, CarryWeight,
         BuildStamina, StaminaUse,  // BuildStamina = hoe/hammer/cultivator; StaminaUse = GENERAL umbrella over all 8 leaves
         Defense,                   // GENERAL umbrella over armor% + parry + stagger + fall damage
-        ResBlunt, ResSlash, ResPierce, ResFire, ResFrost, ResPoison, ResLightning, ResSpirit  // per-type resistance (categorical)
+        ResBlunt, ResSlash, ResPierce, ResFire, ResFrost, ResPoison, ResLightning, ResSpirit,  // per-type resistance (categorical)
+        // per-type OUTGOING damage % — leaves under the Damage domain (m_percentigeDamageModifiers)
+        DmgBlunt, DmgSlash, DmgPierce, DmgFire, DmgFrost, DmgPoison, DmgLightning, DmgSpirit,
+        SkillXp,                   // vanilla skill-XP gain %, all skills (SE m_raiseSkill = All)
+        // hook axes (no SE field — Harmony patches): offense dealt + mobility
+        AttackSpeed,               // swing speed % (local: animator speed during attack)
+        StaggerDealt,              // stagger inflicted on enemies % (owner: hit.m_staggerMultiplier)
+        BackstabDealt,             // backstab bonus dealt % (owner: hit.m_backstabBonus)
+        CrouchSpeed,               // crouch move speed % (local: Character.m_crouchSpeed)
+        JumpHeight,                // jump force % (local: Character.Jump)
+        Survival,                  // GENERAL umbrella over food + rested duration
+        WoodCutting,               // woodcutting skill levels (local: Skills.GetSkillLevel)
+        Pickaxes,                  // pickaxe/mining skill levels (local: Skills.GetSkillLevel)
+        FoodDuration,              // food duration % (local: EatFood)
+        RestedDuration,            // rested buff duration % (local: SE_Rested.UpdateTTL)
+        BlockForce                 // shield block power % — Defense leaf (local: ItemData.GetBlockPower)
     }
 
     internal sealed class AxisDef
@@ -132,12 +161,12 @@ namespace EnvReporter
         // Magnitudes are a unified int 0–10 roll per axis (see BoonRoller); unit is % unless flat.
         internal static readonly Dictionary<BoonAxis, AxisDef> Def = new()
         {
-            [BoonAxis.Damage]      = new AxisDef { GiveAdj="Keen",      GiveNoun="the Edge",   TakeAdj="Dull",       TakeNoun="the Dull",   Noun="damage",        Percent=true },
+            [BoonAxis.Damage]      = new AxisDef { GiveAdj="Keen",      GiveNoun="the Edge",   TakeAdj="Dull",       TakeNoun="the Dull",   Noun="damage",        Percent=true, General=true },
             [BoonAxis.AtkStamina]  = new AxisDef { GiveAdj="Deft",      GiveNoun="the Flurry", TakeAdj="Taxing",     TakeNoun="the Exertion",Noun="attack stamina use",Percent=true, Cost=true },
             [BoonAxis.MoveSpeed]   = new AxisDef { GiveAdj="Swift",     GiveNoun="Haste",      TakeAdj="Sluggish",   TakeNoun="Sloth",      Noun="move speed",    Percent=true },
             [BoonAxis.HpRegen]     = new AxisDef { GiveAdj="Mending",   GiveNoun="Recovery",   TakeAdj="Festering",  TakeNoun="the Wound",  Noun="health regen",  Percent=true },
             [BoonAxis.StamRegen]   = new AxisDef { GiveAdj="Tireless",  GiveNoun="Endurance",  TakeAdj="Weary",      TakeNoun="Weariness",  Noun="stamina regen", Percent=true },
-            [BoonAxis.Block]       = new AxisDef { GiveAdj="Warded",    GiveNoun="the Bulwark",TakeAdj="Brittle",    TakeNoun="Brittleness",Noun="armor",         Percent=false },
+            [BoonAxis.FlatArmor]   = new AxisDef { GiveAdj="Warded",    GiveNoun="the Bulwark",TakeAdj="Brittle",    TakeNoun="Brittleness",Noun="armor",         Percent=false },
             [BoonAxis.RunStamina]  = new AxisDef { GiveAdj="Bounding",  GiveNoun="Vigor",      TakeAdj="Heavy",      TakeNoun="the Burden", Noun="run stamina use",   Percent=true, Cost=true },
             [BoonAxis.JumpStamina] = new AxisDef { GiveAdj="Lofty",     GiveNoun="the Spring", TakeAdj="Leaden",     TakeNoun="the Anchor", Noun="jump stamina use",  Percent=true, Cost=true },
             [BoonAxis.BlockStamina]= new AxisDef { GiveAdj="Steady",    GiveNoun="the Guard",  TakeAdj="Strained",   TakeNoun="the Strain", Noun="block stamina use", Percent=true, Cost=true },
@@ -146,11 +175,11 @@ namespace EnvReporter
             [BoonAxis.SneakStamina]= new AxisDef { GiveAdj="Quiet",     GiveNoun="Stillness",  TakeAdj="Restless",   TakeNoun="Restlessness",Noun="sneak stamina use",Percent=true, Cost=true },
             [BoonAxis.Stagger]     = new AxisDef { GiveAdj="Unshaken",  GiveNoun="Poise",      TakeAdj="Faltering",  TakeNoun="the Falter", Noun="stagger",       Percent=true, Cost=true },
             [BoonAxis.FallDamage]  = new AxisDef { GiveAdj="Feathered", GiveNoun="the Feather",TakeAdj="Plummeting", TakeNoun="the Plummet",Noun="fall damage",   Percent=true, Cost=true },
-            [BoonAxis.ArmorPct]    = new AxisDef { GiveAdj="Ironclad",  GiveNoun="the Aegis",  TakeAdj="Exposed",    TakeNoun="Exposure",   Noun="armor %",       Percent=true },
+            [BoonAxis.ArmorPct]    = new AxisDef { GiveAdj="Ironclad",  GiveNoun="the Aegis",  TakeAdj="Exposed",    TakeNoun="Exposure",   Noun="armor",         Percent=true },
             [BoonAxis.Parry]       = new AxisDef { GiveAdj="Deflecting",GiveNoun="the Parry",  TakeAdj="Open",       TakeNoun="the Opening",Noun="parry bonus",   Percent=true },
             [BoonAxis.EitrRegen]   = new AxisDef { GiveAdj="Attuned",   GiveNoun="the Flow",   TakeAdj="Dim",        TakeNoun="the Dimming",Noun="eitr regen",    Percent=true },
             [BoonAxis.SwimSpeed]   = new AxisDef { GiveAdj="Gliding",   GiveNoun="the Current",TakeAdj="Dragging",   TakeNoun="the Drag",   Noun="swim speed",    Percent=true },
-            [BoonAxis.Stealth]     = new AxisDef { GiveAdj="Unseen",    GiveNoun="the Veil",   TakeAdj="Conspicuous",TakeNoun="the Glare",  Noun="sneak",         Percent=true },
+            [BoonAxis.Stealth]     = new AxisDef { GiveAdj="Unseen",    GiveNoun="the Veil",   TakeAdj="Conspicuous",TakeNoun="the Glare",  Noun="sneak skill",   Percent=false },
             [BoonAxis.CarryWeight] = new AxisDef { GiveAdj="Mighty",    GiveNoun="the Ox",     TakeAdj="Overladen",  TakeNoun="the Load",   Noun="carry weight",  Percent=false },
             [BoonAxis.BuildStamina]= new AxisDef { GiveAdj="Industrious",GiveNoun="the Craft",TakeAdj="Toilsome",   TakeNoun="the Labor",  Noun="build stamina use",Percent=true, Cost=true },
             [BoonAxis.StaminaUse]  = new AxisDef { GiveAdj="Fluid",     GiveNoun="Grace",      TakeAdj="Labored",    TakeNoun="Toil",       Noun="stamina use",   Percent=true, Cost=true, General=true },
@@ -164,12 +193,66 @@ namespace EnvReporter
             [BoonAxis.ResPoison]   = new AxisDef { GiveAdj="Purified",  GiveNoun="the Antidote",TakeAdj="Envenomed", TakeNoun="the Venom",  Noun="poison",    Categorical=true, DType=HitData.DamageType.Poison },
             [BoonAxis.ResLightning]= new AxisDef { GiveAdj="Grounded",  GiveNoun="the Earth",  TakeAdj="Shocked",    TakeNoun="the Storm",  Noun="lightning", Categorical=true, DType=HitData.DamageType.Lightning },
             [BoonAxis.ResSpirit]   = new AxisDef { GiveAdj="Hallowed",  GiveNoun="the Ward",   TakeAdj="Haunted",    TakeNoun="the Specter",Noun="spirit",    Categorical=true, DType=HitData.DamageType.Spirit },
+            // per-type OUTGOING damage % (leaves under Damage): feed m_percentigeDamageModifiers
+            [BoonAxis.DmgBlunt]    = new AxisDef { GiveAdj="Crushing",  GiveNoun="the Maul",   TakeAdj="Soft",       TakeNoun="the Softness",Noun="blunt damage",    Percent=true, DType=HitData.DamageType.Blunt },
+            [BoonAxis.DmgSlash]    = new AxisDef { GiveAdj="Honed",     GiveNoun="the Cut",    TakeAdj="Blunted",    TakeNoun="the Nick",   Noun="slash damage",    Percent=true, DType=HitData.DamageType.Slash },
+            [BoonAxis.DmgPierce]   = new AxisDef { GiveAdj="Piercing",  GiveNoun="the Point",  TakeAdj="Bent",       TakeNoun="the Bend",   Noun="pierce damage",   Percent=true, DType=HitData.DamageType.Pierce },
+            [BoonAxis.DmgFire]     = new AxisDef { GiveAdj="Blazing",   GiveNoun="the Flame",  TakeAdj="Smoldering", TakeNoun="the Cinder", Noun="fire damage",     Percent=true, DType=HitData.DamageType.Fire },
+            [BoonAxis.DmgFrost]    = new AxisDef { GiveAdj="Biting",    GiveNoun="the Rime",   TakeAdj="Melting",    TakeNoun="the Slush",  Noun="frost damage",    Percent=true, DType=HitData.DamageType.Frost },
+            [BoonAxis.DmgPoison]   = new AxisDef { GiveAdj="Virulent",  GiveNoun="the Blight", TakeAdj="Diluted",    TakeNoun="the Dilution",Noun="poison damage",  Percent=true, DType=HitData.DamageType.Poison },
+            [BoonAxis.DmgLightning]= new AxisDef { GiveAdj="Galvanic",  GiveNoun="the Bolt",   TakeAdj="Faded",      TakeNoun="the Flicker",Noun="lightning damage",Percent=true, DType=HitData.DamageType.Lightning },
+            [BoonAxis.DmgSpirit]   = new AxisDef { GiveAdj="Consecrated",GiveNoun="the Smite", TakeAdj="Profane",    TakeNoun="the Profane",Noun="spirit damage",   Percent=true, DType=HitData.DamageType.Spirit },
+            [BoonAxis.SkillXp]     = new AxisDef { GiveAdj="Apt",       GiveNoun="the Prodigy",TakeAdj="Dull-witted",TakeNoun="the Dullard",Noun="skill experience",Percent=true },
+            [BoonAxis.AttackSpeed] = new AxisDef { GiveAdj="Quick",     GiveNoun="the Tempo",  TakeAdj="Ponderous",  TakeNoun="the Lag",    Noun="attack speed",    Percent=true },
+            [BoonAxis.StaggerDealt]= new AxisDef { GiveAdj="Jarring",   GiveNoun="the Jolt",   TakeAdj="Gentle",      TakeNoun="the Lull",   Noun="stagger dealt",   Percent=true },
+            [BoonAxis.BackstabDealt]=new AxisDef { GiveAdj="Insidious", GiveNoun="the Ambush", TakeAdj="Forthright",  TakeNoun="the Fair Fight",Noun="backstab damage",Percent=true },
+            [BoonAxis.CrouchSpeed] = new AxisDef { GiveAdj="Prowling",  GiveNoun="the Prowl",  TakeAdj="Creeping",    TakeNoun="the Crawl",  Noun="crouch speed",    Percent=true },
+            [BoonAxis.JumpHeight]  = new AxisDef { GiveAdj="Leaping",   GiveNoun="the Leap",   TakeAdj="Earthbound",  TakeNoun="the Weight", Noun="jump height",     Percent=true },
+            [BoonAxis.Survival]    = new AxisDef { GiveAdj="Hardy",     GiveNoun="the Hearth", TakeAdj="Frail",       TakeNoun="the Hunger", Noun="food & rest duration",Percent=true, General=true },
+            [BoonAxis.WoodCutting] = new AxisDef { GiveAdj="Timberborn",GiveNoun="the Axe",    TakeAdj="Splintered",  TakeNoun="the Splinter",Noun="woodcutting",     Percent=false },
+            [BoonAxis.Pickaxes]    = new AxisDef { GiveAdj="Delving",   GiveNoun="the Vein",   TakeAdj="Blunt-tipped",TakeNoun="the Rubble", Noun="mining",          Percent=false },
+            [BoonAxis.FoodDuration]  = new AxisDef { GiveAdj="Sated",   GiveNoun="the Feast",  TakeAdj="Starved",     TakeNoun="the Famine", Noun="food duration",   Percent=true },
+            [BoonAxis.RestedDuration]= new AxisDef { GiveAdj="Restful", GiveNoun="Repose",     TakeAdj="Restless",    TakeNoun="the Vigil",  Noun="rested duration", Percent=true },
+            [BoonAxis.BlockForce]  = new AxisDef { GiveAdj="Immovable", GiveNoun="the Rampart",TakeAdj="Yielding",    TakeNoun="the Give",   Noun="block force",     Percent=true },
+        };
+
+        // the 8 per-type outgoing-damage axes → the DamageTypes field they feed
+        internal static readonly BoonAxis[] DamageAxes =
+        {
+            BoonAxis.DmgBlunt, BoonAxis.DmgSlash, BoonAxis.DmgPierce, BoonAxis.DmgFire,
+            BoonAxis.DmgFrost, BoonAxis.DmgPoison, BoonAxis.DmgLightning, BoonAxis.DmgSpirit,
         };
         internal static readonly BoonAxis[] All = (BoonAxis[])Enum.GetValues(typeof(BoonAxis));
 
         // the leaves each general umbrella feeds (used by Apply and by the character-sheet breakout)
         internal static readonly HashSet<BoonAxis> DefenseParts = new()
-        { BoonAxis.ArmorPct, BoonAxis.Parry, BoonAxis.Stagger, BoonAxis.FallDamage };
+        { BoonAxis.ArmorPct, BoonAxis.Parry, BoonAxis.Stagger, BoonAxis.FallDamage, BoonAxis.BlockForce };
+
+        // the 8 stamina-use leaves the StaminaUse general feeds (also a roll-weight bucket)
+        internal static readonly HashSet<BoonAxis> StaminaLeaves = new()
+        {
+            BoonAxis.AtkStamina, BoonAxis.RunStamina, BoonAxis.JumpStamina, BoonAxis.BlockStamina,
+            BoonAxis.DodgeStamina, BoonAxis.SwimStamina, BoonAxis.SneakStamina, BoonAxis.BuildStamina,
+        };
+        static readonly HashSet<BoonAxis> DamageLeafSet = new(DamageAxes);
+
+        // roll-weight for an axis, by bucket (generals rare, resistances/leaves damped, baseline = 1)
+        internal static float Weight(BoonAxis a)
+        {
+            var d = Def[a];
+            if (d.General)                 return BoonCfg.WeightGeneral;
+            if (d.Categorical)             return BoonCfg.WeightResist;
+            if (DamageLeafSet.Contains(a)) return BoonCfg.WeightDmgType;
+            if (StaminaLeaves.Contains(a)) return BoonCfg.WeightStamLeaf;
+            return BoonCfg.WeightBase;
+        }
+
+        // baseline bucket = none of the special buckets (Pyrrhic shrinks this so rarer, stronger axes win more often)
+        internal static bool IsBaseline(BoonAxis a)
+        {
+            var d = Def[a];
+            return !d.General && !d.Categorical && !DamageLeafSet.Contains(a) && !StaminaLeaves.Contains(a);
+        }
 
         // numeric give/take/give2 draw from here (EXCLUDES the categorical resistance axes — those only come
         // from the dedicated resistance branch, always paired resist/weak).
@@ -183,9 +266,9 @@ namespace EnvReporter
         };
 
         // net points → damage category (give/positive = resist ladder, take/negative = weak ladder)
+        // Boons cap at Very resistant — Immune (full negation) is intentionally out of reach.
         internal static HitData.DamageModifier Category(int net) =>
-            net >= 10 ? HitData.DamageModifier.Immune
-          : net >= 7  ? HitData.DamageModifier.VeryResistant
+            net >= 7  ? HitData.DamageModifier.VeryResistant
           : net >= 4  ? HitData.DamageModifier.Resistant
           : net >= 1  ? HitData.DamageModifier.SlightlyResistant
           : net <= -7 ? HitData.DamageModifier.VeryWeak
@@ -195,129 +278,156 @@ namespace EnvReporter
 
         // human text for a category net (positive = resist, negative = weak)
         internal static string CatText(int net) =>
-            net >= 10 ? "Immune" : net >= 7 ? "Very resistant" : net >= 4 ? "Resistant" : net >= 1 ? "Slightly resistant"
+            net >= 7 ? "Very resistant" : net >= 4 ? "Resistant" : net >= 1 ? "Slightly resistant"
           : net <= -7 ? "Very weak" : net <= -4 ? "Weak" : net <= -1 ? "Slightly weak" : "";
     }
 
-    // ---- one rolled boon -----------------------------------------------------
+    // ---- one axis on a rolled boon (Net > 0 = give, Net < 0 = take) -----------
+    internal struct AxisRoll { public BoonAxis Axis; public int Net; }
+
+    // ---- one rolled boon: a list of axis attributes (or a keystone) ----------
     internal sealed class Boon
     {
-        public BoonAxis GiveAxis;  public int GiveAmt;
-        public bool     HasGive2;  public BoonAxis Give2Axis; public int Give2Amt;   // rares roll a second gift
-        public bool     HasTake;   public BoonAxis TakeAxis; public int TakeAmt;
-        public int      Rarity;    // 0 common, 1 magic, 2 rare, 3 unique (keystone)
-        public KeystoneId Keystone = KeystoneId.None;   // set → this boon is a legendary keystone (no axes)
+        public int Rarity;    // 0 common, 1 magic, 2 rare, 3 unique (keystone)
+        public KeystoneId Keystone = KeystoneId.None;   // set → legendary keystone (no axis rolls)
+        public readonly List<AxisRoll> Rolls = new List<AxisRoll>();   // summed per axis; empty for keystones
 
         public bool IsKeystone => Keystone != KeystoneId.None;
-
-        // Prefix = gift adjective (give axis); suffix = cost noun (take axis).
-        // A pure boon reuses the give axis's own positive noun as the suffix ("Keen Boon of the Edge").
-        public string Name => IsKeystone ? Keystones.Def[Keystone].Name
-            : HasTake ? $"{Axes.Def[GiveAxis].GiveAdj} Boon of {Axes.Def[TakeAxis].TakeNoun}"
-            : $"{Axes.Def[GiveAxis].GiveAdj} Boon of {Axes.Def[GiveAxis].GiveNoun}";
-
         public string Desc => IsKeystone ? Keystones.Def[Keystone].Desc : "";
 
-        public string GiveText => Line(GiveAxis, GiveAmt, give:true);
-        public string Give2Text => HasGive2 ? Line(Give2Axis, Give2Amt, give:true) : "";
-        public string TakeText => HasTake ? Line(TakeAxis, TakeAmt, give:false) : "";
-
-        static string Line(BoonAxis ax, int amt, bool give)
+        // Name: biggest gift's adjective + biggest cost's noun (or the gift's own noun if there's no cost).
+        public string Name
         {
-            var d = Axes.Def[ax];
-            if (d.Categorical)   // resistance: give = resist ladder, take = weak ladder
-                return $"{Axes.CatText(give ? amt : -amt)} to {d.Noun}";
-            string sign = (give ^ d.Cost) ? "+" : "-";   // cost axis: a gift REDUCES the stat (shown −)
-            string unit = d.Percent ? "%" : "";
-            return $"{sign}{amt}{unit} {d.Noun}";
+            get
+            {
+                if (IsKeystone) return Keystones.Def[Keystone].Name;
+                AxisRoll give = default, take = default; bool hasG = false, hasT = false;
+                foreach (var r in Rolls)
+                {
+                    if (r.Net > 0 && (!hasG || r.Net > give.Net)) { give = r; hasG = true; }
+                    if (r.Net < 0 && (!hasT || r.Net < take.Net)) { take = r; hasT = true; }
+                }
+                string adj = hasG ? Axes.Def[give.Axis].GiveAdj : "Hollow";
+                string suf = hasT ? Axes.Def[take.Axis].TakeNoun
+                           : hasG ? Axes.Def[give.Axis].GiveNoun : "Nothing";
+                return $"{adj} Boon of {suf}";
+            }
         }
 
-        // compact serialization:  g,gAmt,hasTake,t,tAmt,rarity,keystone[,hasGive2,g2,g2Amt]
+        // One display line for an axis roll. Give = green, take = red (caller colours by Net sign).
+        public static string Line(AxisRoll r)
+        {
+            var d = Axes.Def[r.Axis];
+            if (d.Categorical) return $"{Axes.CatText(r.Net)} to {d.Noun}";   // "Resistant to fire" / "Weak to frost"
+            bool give = r.Net > 0; int mag = Math.Abs(r.Net);
+            string sign = (give ^ d.Cost) ? "+" : "-";   // cost axis: a gift REDUCES the stat (shown −)
+            string unit = d.Percent ? "%" : "";
+            return $"{sign}{mag}{unit} {d.Noun}";
+        }
+
+        // serialization:  keystone,rarity,axis:net;axis:net;...
         public string Serialize() =>
-            string.Join(",", (int)GiveAxis, GiveAmt, HasTake ? 1 : 0, (int)TakeAxis, TakeAmt, Rarity, (int)Keystone,
-                        HasGive2 ? 1 : 0, (int)Give2Axis, Give2Amt);
+            $"{(int)Keystone},{Rarity}," + string.Join(";", Rolls.Select(r => $"{(int)r.Axis}:{r.Net}"));
 
         public static Boon Deserialize(string s)
         {
             var p = s.Split(',');
-            return new Boon {
-                GiveAxis=(BoonAxis)int.Parse(p[0]), GiveAmt=int.Parse(p[1]),
-                HasTake=p[2]=="1", TakeAxis=(BoonAxis)int.Parse(p[3]), TakeAmt=int.Parse(p[4]),
-                Rarity=int.Parse(p[5]),
-                Keystone = p.Length > 6 ? (KeystoneId)int.Parse(p[6]) : KeystoneId.None,
-                HasGive2 = p.Length > 7 && p[7] == "1",
-                Give2Axis = p.Length > 8 ? (BoonAxis)int.Parse(p[8]) : BoonAxis.Damage,
-                Give2Amt = p.Length > 9 ? int.Parse(p[9]) : 0 };
+            var b = new Boon { Keystone = (KeystoneId)int.Parse(p[0]), Rarity = int.Parse(p[1]) };
+            if (p.Length > 2 && p[2].Length > 0)
+                foreach (var chunk in p[2].Split(';'))
+                {
+                    if (chunk.Length == 0) continue;
+                    var kv = chunk.Split(':');
+                    b.Rolls.Add(new AxisRoll { Axis = (BoonAxis)int.Parse(kv[0]), Net = int.Parse(kv[1]) });
+                }
+            return b;
         }
     }
 
-    // ---- the roll engine (port of the prototype) -----------------------------
+    // ---- the roll engine -----------------------------------------------------
     internal static class BoonRoller
     {
         static readonly System.Random Rng = new System.Random();
 
-        // One magnitude roll: a uniform int on 0–10. Same rule for first roll and rerolls.
-        static int Roll010() => (int)Math.Round(Rng.NextDouble() * 10.0);
+        static int Roll010() => (int)Math.Round(Rng.NextDouble() * 10.0);   // uniform 0–10
 
-        internal static Boon Roll(bool rare)
+        // number of attributes, weighted (default 40/30/20/10 for 1/2/3/4)
+        static int RollCount()
         {
+            float w1 = BoonCfg.AttrW1, w2 = BoonCfg.AttrW2, w3 = BoonCfg.AttrW3, w4 = BoonCfg.AttrW4;
+            float tot = w1 + w2 + w3 + w4;
+            if (tot <= 0f) return 1;
+            double r = Rng.NextDouble() * tot;
+            if (r < w1) return 1; r -= w1;
+            if (r < w2) return 2; r -= w2;
+            if (r < w3) return 3;
+            return 4;
+        }
+
+        // A numeric boon: roll a count, attribute 1 is a give, the rest 50/50; roll axis + value per
+        // attribute; sum by axis; rarity = max(count tier, value tier).
+        // Pyrrhic (keystone): shrink the baseline bucket so generals/resist/damage/leaf axes win more often → better rolls
+        static bool PyrrhicActive() =>
+            BoonCfg.LegendaryEnabled(KeystoneId.Pyrrhic) && BoonHud.State != null && BoonHud.State.HasKeystone(KeystoneId.Pyrrhic);
+
+        static float WeightOf(BoonAxis a, bool pyr)
+        {
+            float w = Axes.Weight(a);
+            if (pyr && Axes.IsBaseline(a)) w *= BoonCfg.PyrrhicBaseFactor;
+            return w;
+        }
+
+        // weighted axis pick (bucket weights: generals rare, resistances/leaves damped)
+        static BoonAxis PickAxis()
+        {
+            bool pyr = PyrrhicActive();
+            float tot = 0f;
+            foreach (var a in Axes.All) tot += WeightOf(a, pyr);
+            if (tot <= 0f) return Axes.All[Rng.Next(Axes.All.Length)];
+            double r = Rng.NextDouble() * tot;
+            foreach (var a in Axes.All) { r -= WeightOf(a, pyr); if (r < 0) return a; }
+            return Axes.All[Axes.All.Length - 1];
+        }
+
+        static Boon RollNumeric()
+        {
+            int count = RollCount();
+            var net = new Dictionary<BoonAxis, int>();
+            for (int i = 0; i < count; i++)
+            {
+                bool give = i == 0 || Rng.NextDouble() < 0.5;
+                var axis = PickAxis();
+                int val = Roll010();
+                net.TryGetValue(axis, out int cur);
+                net[axis] = cur + (give ? val : -val);
+            }
             var b = new Boon();
-            // give and take axes rolled independently → P(same axis) = (1/6)², intuitive and uncoerced
-            b.GiveAxis = Axes.NumericAxes[Rng.Next(Axes.NumericAxes.Length)];
-            b.TakeAxis = Axes.NumericAxes[Rng.Next(Axes.NumericAxes.Length)];
-
-            int give = Roll010();
-            int take = Roll010();
-            if (b.GiveAxis == b.TakeAxis)
-            {
-                // same axis: give & take would cancel → collapse to a net gift of at least 1 (clamp in player's favor)
-                give = Math.Max(1, give - take); take = 0;
-            }
-            else
-            {
-                // different axes: allow a "gamble" where the cost can exceed the gift (some boons just suck); ensure give ≥ 1
-                give = Math.Max(1, give);
-            }
-
-            b.GiveAmt = give;
-            b.TakeAmt = take;
-            b.HasTake = take > 0;                               // take rolled to 0 → incidental "pure" boon
-
-            if (rare)
-            {
-                // rare: a SECOND gift (2 gives + 1 take); a lucky 0 take → 2 gives, no cost
-                b.Rarity = 2;
-                b.HasGive2 = true;
-                b.Give2Axis = Axes.NumericAxes[Rng.Next(Axes.NumericAxes.Length)];
-                b.Give2Amt = Math.Max(1, Roll010());
-            }
-            else
-            {
-                // common vs uncommon by magnitude: bigger gift / smaller cost = uncommon. (Rare & Unique are rolled by chance.)
-                float score = give - 0.5f * take + (b.HasTake ? 0f : 1.5f);
-                b.Rarity = score >= 5f ? 1 : 0;
-                // a GENERAL (umbrella) gift is broadly useful → rarity signal: it can't roll Common
-                if (Axes.Def[b.GiveAxis].General) b.Rarity = Math.Max(b.Rarity, 1);
-            }
+            foreach (var kv in net) if (kv.Value != 0) b.Rolls.Add(new AxisRoll { Axis = kv.Key, Net = kv.Value });
+            // single-axis boons never net ≤ 0 (clamp the gift to beat the cost)
+            if (b.Rolls.Count == 1 && b.Rolls[0].Net < 1) b.Rolls[0] = new AxisRoll { Axis = b.Rolls[0].Axis, Net = 1 };
+            if (b.Rolls.Count == 0) b.Rolls.Add(new AxisRoll { Axis = PickAxis(), Net = 1 });
+            b.Rarity = RarityOf(b);
             return b;
         }
 
-        // A per-type resistance boon: give = resist one damage type, take = weak to a different one (a bet on incoming damage).
-        static Boon RollResist()
+        // Rarity = max(count tier, value tier), floored to Rare if any general attribute is present.
+        // Count tier: 1–2 Common, 3 Magic, 4 Rare.  Value tier from (gives − takes) + (Σgive − Σtake)/4.
+        // A general (give OR take) signals generality itself → always at least Rare.
+        static int RarityOf(Boon b)
         {
-            var b = new Boon();
-            var types = Axes.ResistAxes;
-            b.GiveAxis = types[Rng.Next(types.Length)];
-            do { b.TakeAxis = types[Rng.Next(types.Length)]; } while (b.TakeAxis == b.GiveAxis);
-            int give = Math.Max(1, Roll010());   // always at least slightly resistant
-            int take = Roll010();
-            b.GiveAmt = give; b.TakeAmt = take; b.HasTake = take > 0;
-            float score = give - 0.5f * take + (b.HasTake ? 0f : 1.5f);
-            b.Rarity = score >= 8f ? 2 : score >= 5f ? 1 : 0;
-            return b;
+            int count = b.Rolls.Count;
+            int countTier = count <= 2 ? 0 : count == 3 ? 1 : 2;
+            int g = 0, t = 0, sumG = 0, sumT = 0;
+            foreach (var r in b.Rolls)
+                if (r.Net > 0) { g++; sumG += r.Net; } else { t++; sumT += -r.Net; }
+            float vs = (g - t) + (sumG - sumT) / 4f;
+            int valueTier = vs >= 6f ? 2 : vs >= 3f ? 1 : 0;
+            int rarity = Math.Max(countTier, valueTier);
+            if (b.Rolls.Any(r => Axes.Def[r.Axis].General)) rarity = Math.Max(rarity, 2);   // any general → Rare
+            return rarity;
         }
 
-        // A keystone (Unique) from the pool: enabled, not already owned, not already offered this draw.
+        // A keystone (Unique) from the pool: enabled, not owned, not already offered this draw.
         static Boon RollKeystone(HashSet<KeystoneId> owned, HashSet<KeystoneId> offered)
         {
             var pool = Keystones.All.Where(k => Keystones.Available(k) && !owned.Contains(k) && !offered.Contains(k)).ToArray();
@@ -325,12 +435,13 @@ namespace EnvReporter
             return new Boon { Keystone = pool[Rng.Next(pool.Length)], Rarity = 3 };
         }
 
-        // Each slot: LegendaryChance to roll a keystone, else a give/take boon. Offers must be meaningfully
-        // distinct — no two share a give/take axis pair, no duplicate keystones. Reroll until DrawCount filled.
+        static string Signature(Boon b) => string.Join(";", b.Rolls.Select(r => (int)r.Axis).OrderBy(x => x));
+
+        // Each card: LegendaryChance for a keystone, else a numeric boon. Dedup across the draw.
         internal static List<Boon> Draw()
         {
             var list = new List<Boon>();
-            var seenAxes = new HashSet<(int give, int take)>();
+            var seen = new HashSet<string>();
             var offeredKeys = new HashSet<KeystoneId>();
             var owned = BoonHud.State != null
                 ? new HashSet<KeystoneId>(BoonHud.State.Boons.Where(b => b.IsKeystone).Select(b => b.Keystone))
@@ -339,15 +450,11 @@ namespace EnvReporter
             while (list.Count < BoonCfg.DrawCount && guard++ < 400)
             {
                 Boon b = null;
-                double r = Rng.NextDouble();
-                double cLeg = BoonCfg.LegendaryChance, cRare = cLeg + BoonCfg.RareChance, cRes = cRare + BoonCfg.ResistChance;
-                if (r < cLeg)       b = RollKeystone(owned, offeredKeys);   // Unique
-                else if (r < cRare) b = Roll(true);                        // Rare (2 gives)
-                else if (r < cRes)  b = RollResist();                      // per-type resistance (resist X / weak Y)
-                if (b == null) b = Roll(false);   // remainder (or keystone pool exhausted) → common/uncommon
+                if (Rng.NextDouble() < BoonCfg.LegendaryChance) b = RollKeystone(owned, offeredKeys);
+                if (b == null) b = RollNumeric();
 
                 if (b.IsKeystone) { if (offeredKeys.Add(b.Keystone)) list.Add(b); }
-                else { var key = ((int)b.GiveAxis, b.HasTake ? (int)b.TakeAxis : -1); if (seenAxes.Add(key)) list.Add(b); }
+                else { if (seen.Add(Signature(b))) list.Add(b); }
             }
             return list;
         }
@@ -403,9 +510,7 @@ namespace EnvReporter
             foreach (var b in Boons)
             {
                 if (b.IsKeystone) continue;
-                t[b.GiveAxis] += b.GiveAmt;
-                if (b.HasGive2) t[b.Give2Axis] += b.Give2Amt;
-                if (b.HasTake) t[b.TakeAxis] -= b.TakeAmt;
+                foreach (var r in b.Rolls) t[r.Axis] += r.Net;
             }
             return t;
         }
@@ -417,6 +522,23 @@ namespace EnvReporter
         const string SeName = "PilgrimBoons";
         static readonly int SeHash = SeName.GetStableHashCode(); // matches NameHash() (uses Object.name)
         static SE_Stats _template;
+
+        // hook-axis caches the Harmony patches read (updated each Apply; local player only)
+        internal static float AtkSpeedMul = 1f;   // 1 + attack-speed% (animator speed during attack)
+        internal static float JumpMul     = 1f;   // 1 + jump-height%  (scales m_jumpForce)
+        internal static float FoodMul     = 1f;   // 1 + (food + Survival general)%
+        internal static float RestedMul   = 1f;   // 1 + (rested + Survival general)%
+        internal static float BlockForceMul = 1f; // 1 + (block-force + Defense general)%
+        internal static int   WoodLvl     = 0;    // woodcutting skill levels added
+        internal static int   PickLvl     = 0;    // pickaxe/mining skill levels added
+        static float _baseCrouch = -1f;           // vanilla m_crouchSpeed, captured fresh on spawn
+
+        // capture the untouched crouch speed before any boon modifies it (once per session — the prefab base is constant)
+        internal static void CaptureBase(Player p) { if (p != null && _baseCrouch < 0f) _baseCrouch = p.m_crouchSpeed; }
+
+        // called on each fresh spawn: capture base at the guaranteed-clean moment, and reset the attack-speed flag
+        // (it self-heals on the next tick anyway, but an explicit reset keeps the belief clean across a reload)
+        internal static void OnSpawn(Player p) { CaptureBase(p); Boon_AttackSpeed.ResetFast(); }
 
         // Configured once; SEMan.AddStatusEffect CLONES this, so we mutate the clone it holds.
         static SE_Stats Template()
@@ -451,7 +573,7 @@ namespace EnvReporter
             active.m_speedModifier            =  t[BoonAxis.MoveSpeed]     / 100f;
             active.m_healthRegenMultiplier    = 1f + t[BoonAxis.HpRegen]   / 100f;
             active.m_staminaRegenMultiplier   = 1f + t[BoonAxis.StamRegen] / 100f;
-            active.m_addArmor                 =  t[BoonAxis.Block];
+            active.m_addArmor                 =  t[BoonAxis.FlatArmor];
             active.m_modifyAttackSkill        = Skills.SkillType.All;
 
             // stamina-use axes (cost: negative = cheaper). The GENERAL "stamina use" adds to every leaf.
@@ -470,22 +592,49 @@ namespace EnvReporter
             active.m_fallDamageModifier       = -((t[BoonAxis.FallDamage] + gDef) / 100f);  // negative = less fall damage
             active.m_armorMultiplier          =  (t[BoonAxis.ArmorPct]    + gDef) / 100f;   // neutral 0 → ×(1+x)
             active.m_timedBlockBonus          =  (t[BoonAxis.Parry]       + gDef) / 100f;   // neutral 0 → parry ×(1+x)
+            BlockForceMul                     = 1f + (t[BoonAxis.BlockForce] + gDef) / 100f;  // shield block power (hook: GetBlockPower)
             // utility
             active.m_eitrRegenMultiplier      = 1f + t[BoonAxis.EitrRegen] / 100f;
             active.m_swimSpeedModifier        =  t[BoonAxis.SwimSpeed]     / 100f;
-            active.m_stealthModifier          =  t[BoonAxis.Stealth]       / 100f;   // higher = stealthier
+            active.m_stealthModifier          = 0f;                                  // sneak is now a skill axis (below)
             float carry = t[BoonAxis.CarryWeight];                                   // flat axis bonus
             if (st.HasKeystone(KeystoneId.Regret)) carry += p.m_maxCarryWeight;      // Regret: +base = 2x carry weight
             active.m_addMaxCarryWeight        =  carry;
 
-            // Dread (keystone): +30 effective Sneak skill, via the SE's skill-level slot
-            bool dread = st.HasKeystone(KeystoneId.Dread);
-            active.m_skillLevel         = dread ? Skills.SkillType.Sneak : Skills.SkillType.None;
-            active.m_skillLevelModifier = dread ? 30f : 0f;
+            // Sneak skill: the Stealth axis adds flat Sneak skill levels; Dread (keystone) adds +30 more.
+            // SE_Stats has a single skill slot — both target Sneak, so they sum cleanly.
+            float sneakSkill = t[BoonAxis.Stealth];
+            if (st.HasKeystone(KeystoneId.Dread)) sneakSkill += 30f;
+            active.m_skillLevel         = sneakSkill != 0f ? Skills.SkillType.Sneak : Skills.SkillType.None;
+            active.m_skillLevelModifier = sneakSkill;
 
-            // Wrath (keystone): +100% slash on outgoing attacks (2x), via the SE's per-type damage modifiers
+            // vanilla skill-XP gain (all skills): SE m_raiseSkillModifier is a multiplier on skill gain
+            float sx = t[BoonAxis.SkillXp];
+            active.m_raiseSkill         = sx != 0f ? Skills.SkillType.All : Skills.SkillType.None;
+            active.m_raiseSkillModifier = 1f + sx / 100f;
+
+            // per-type OUTGOING damage % via m_percentigeDamageModifiers (1f = +100%).
+            // Damage-type leaves + Wrath (keystone, +100% slash) fold into the same struct.
             var pdm = default(HitData.DamageTypes);
-            if (st.HasKeystone(KeystoneId.Wrath)) pdm.m_slash = 1f;
+            foreach (var da in Axes.DamageAxes)
+            {
+                float f = t[da] / 100f;
+                if (f == 0f) continue;
+                switch (Axes.Def[da].DType)
+                {
+                    case HitData.DamageType.Blunt:     pdm.m_blunt     += f; break;
+                    case HitData.DamageType.Slash:     pdm.m_slash     += f; break;
+                    case HitData.DamageType.Pierce:    pdm.m_pierce    += f; break;
+                    case HitData.DamageType.Fire:      pdm.m_fire      += f; break;
+                    case HitData.DamageType.Frost:     pdm.m_frost     += f; break;
+                    case HitData.DamageType.Poison:    pdm.m_poison    += f; break;
+                    case HitData.DamageType.Lightning: pdm.m_lightning += f; break;
+                    case HitData.DamageType.Spirit:    pdm.m_spirit    += f; break;
+                }
+            }
+            if (st.HasKeystone(KeystoneId.Wrath))    pdm.m_slash += 1f;   // Wrath: +100% slash (2x)
+            if (st.HasKeystone(KeystoneId.Temerity)) pdm.m_blunt  += 1f;   // Temerity: +100% blunt (2x)
+            if (st.HasKeystone(KeystoneId.Contempt)) pdm.m_pierce += 1f;   // Contempt: +100% pierce (2x)
             active.m_percentigeDamageModifiers = pdm;
 
             // per-type resistance (categorical): net points per type → DamageModifier category
@@ -497,6 +646,20 @@ namespace EnvReporter
                     mods.Add(new HitData.DamageModPair { m_type = Axes.Def[ra].DType, m_modifier = cat });
             }
             active.m_mods = mods;
+
+            // ── hook axes (no SE field) ──
+            // local: attack-speed + jump caches read by the Harmony patches; crouch speed sets the field directly
+            AtkSpeedMul = 1f + t[BoonAxis.AttackSpeed] / 100f;
+            JumpMul     = 1f + t[BoonAxis.JumpHeight]  / 100f;
+            float gSurv = t[BoonAxis.Survival];                             // general adds to both leaves
+            FoodMul     = 1f + (t[BoonAxis.FoodDuration]   + gSurv) / 100f;
+            RestedMul   = 1f + (t[BoonAxis.RestedDuration] + gSurv) / 100f;
+            WoodLvl     = t[BoonAxis.WoodCutting];
+            PickLvl     = t[BoonAxis.Pickaxes];
+            CaptureBase(p);
+            if (_baseCrouch > 0f) p.m_crouchSpeed = _baseCrouch * (1f + t[BoonAxis.CrouchSpeed] / 100f);
+            // enemy-side: publish stagger-dealt + backstab-dealt onto the player's ZDO (owner reads it in RPC_Damage)
+            KeystoneNet.WriteOffense(p, t[BoonAxis.StaggerDealt], t[BoonAxis.BackstabDealt]);
         }
 
         // Live boon SE (the clone SEMan holds) — used by the character sheet to measure deltas.
@@ -546,6 +709,7 @@ namespace EnvReporter
             CharSheet.Ensure();                             // general feature, independent of boons
             BoonCfg.EnsureBound();
             if (!BoonCfg.Enabled) { BoonStats.Remove(__instance); return; } // pure vanilla
+            BoonStats.OnSpawn(__instance);                   // capture base crouch at the fresh moment; reset self-healing flags
             BoonHud.State = BoonState.Load(__instance);
             BoonStats.Apply(__instance, BoonHud.State);     // SEMan is cleared on respawn — re-add
             BoonHud.Ensure();
@@ -576,6 +740,25 @@ namespace EnvReporter
     {
         static readonly int OwnedHash   = "pilgrim_keystones".GetStableHashCode();
         static readonly int GriefDmgHash = "pilgrim_grief_dmg".GetStableHashCode();
+        static readonly int StaggerDealtHash  = "pilgrim_stagger_dealt".GetStableHashCode();
+        static readonly int BackstabDealtHash = "pilgrim_backstab_dealt".GetStableHashCode();
+
+        // publish the local player's offense-dealt %s to its ZDO (read by the enemy owner in RPC_Damage)
+        internal static void WriteOffense(Player p, int staggerPct, int backstabPct)
+        {
+            if (p == null || ZDOMan.instance == null) return;
+            var zdo = ZDOMan.instance.GetZDO(p.GetZDOID());
+            if (zdo == null) return;
+            zdo.Set(StaggerDealtHash, staggerPct);
+            zdo.Set(BackstabDealtHash, backstabPct);
+        }
+        static int OffenseZ(ZDOID id, int hash)
+        {
+            var zdo = ZDOMan.instance?.GetZDO(id);
+            return zdo != null ? zdo.GetInt(hash) : 0;
+        }
+        internal static int StaggerDealtZ(ZDOID id)  => OffenseZ(id, StaggerDealtHash);
+        internal static int BackstabDealtZ(ZDOID id) => OffenseZ(id, BackstabDealtHash);
 
         // write the local player's owned-keystone bitmask to its ZDO (called whenever boons change)
         internal static void WriteOwned(Player p, BoonState st)
@@ -716,6 +899,61 @@ namespace EnvReporter
         }
     }
 
+    // ─── Hook axes (no SE field) ──────────────────────────────────────────────
+    // Offense dealt (StaggerDealt, BackstabDealt): RPC_Damage runs on the TARGET's owner (server for monsters).
+    // The attacker's published %s are read off their ZDO, so it's owner-authoritative like Grief/Betrayal.
+    // Runs after Betrayal's prefix may have set m_backstabBonus=10, so the axis scales whatever bonus stands.
+    [HarmonyPatch(typeof(Character), "RPC_Damage")]
+    internal static class Boon_OffenseDealt
+    {
+        static void Prefix(HitData hit)
+        {
+            if (!BoonCfg.Enabled || hit == null || hit.m_attacker == ZDOID.None) return;
+            int sd = KeystoneNet.StaggerDealtZ(hit.m_attacker);
+            if (sd != 0) hit.m_staggerMultiplier *= 1f + sd / 100f;
+            int bd = KeystoneNet.BackstabDealtZ(hit.m_attacker);
+            if (bd != 0 && hit.m_backstabBonus > 1f) hit.m_backstabBonus *= 1f + bd / 100f;
+        }
+    }
+
+    // Jump height (JumpHeight): scale the local player's jump force for the duration of the Jump call.
+    // Jump runs on the controlling client and the resulting velocity/position syncs → MP-correct.
+    [HarmonyPatch(typeof(Character), "Jump")]
+    internal static class Boon_JumpHeight
+    {
+        static void Prefix(Character __instance, out float __state)
+        {
+            __state = 0f;
+            if (!BoonCfg.Enabled || __instance == null || __instance != Player.m_localPlayer) return;
+            if (BoonStats.JumpMul == 1f) return;
+            __state = __instance.m_jumpForce;              // stash the real value
+            __instance.m_jumpForce *= BoonStats.JumpMul;
+        }
+        static void Postfix(Character __instance, float __state)
+        {
+            if (__state > 0f && __instance != null) __instance.m_jumpForce = __state;   // restore
+        }
+    }
+
+    // Attack speed (AttackSpeed): drive the local player's animator speed while an attack is in progress.
+    // ZSyncAnimation.SetSpeed syncs the speed via ZDO, so other clients see the faster swing too → MP-correct.
+    [HarmonyPatch(typeof(Humanoid), "UpdateAttack")]
+    internal static class Boon_AttackSpeed
+    {
+        static bool _fast;
+        internal static void ResetFast() => _fast = false;
+        static void Postfix(Humanoid __instance)
+        {
+            if (!BoonCfg.Enabled || __instance == null || __instance != Player.m_localPlayer) return;
+            bool want = BoonStats.AtkSpeedMul != 1f && __instance.InAttack();
+            if (want == _fast) return;
+            var zanim = Traverse.Create(__instance).Field("m_zanim").GetValue<ZSyncAnimation>();
+            if (zanim == null) return;
+            zanim.SetSpeed(want ? BoonStats.AtkSpeedMul : 1f);
+            _fast = want;
+        }
+    }
+
     // Panic — "Your hands tremble with intent." Bow draw reaches full charge 4x faster (25% of the time).
     // GetAttackDrawPercentage is computed on the player's own client → MP-correct.
     [HarmonyPatch(typeof(Humanoid), "GetAttackDrawPercentage")]
@@ -729,20 +967,66 @@ namespace EnvReporter
         }
     }
 
-    // Nostalgia — "You long for the fellowship of youth." Foods last 20% longer. EatFood runs on the player's own
-    // client (m_foods is local) → MP-correct. We overfill the just-eaten food's timer to 1.2x its burn time.
+    // Food duration — the Survival axis (food + rest %) and Nostalgia keystone (foods last 20% longer) both extend the
+    // just-eaten food's timer. EatFood runs on the player's own client (m_foods is local) → MP-correct.
     [HarmonyPatch(typeof(Player), "EatFood")]
-    internal static class Nostalgia_FoodDuration
+    internal static class Boon_FoodDuration
     {
         static void Postfix(Player __instance, ItemDrop.ItemData item, bool __result)
         {
-            if (!__result || !BoonCfg.Enabled || __instance == null || __instance != Player.m_localPlayer) return;
-            if (!BoonHud.Owns(KeystoneId.Nostalgia) || item == null) return;
+            if (!__result || !BoonCfg.Enabled || __instance == null || __instance != Player.m_localPlayer || item == null) return;
+            float mult = BoonStats.FoodMul;                                   // Food duration leaf (+ Survival general)
+            if (BoonHud.Owns(KeystoneId.Nostalgia)) mult *= 1.2f;            // Nostalgia keystone
+            if (mult == 1f) return;
             var foods = Traverse.Create(__instance).Field("m_foods").GetValue<List<Player.Food>>();
             if (foods == null) return;
             foreach (var f in foods)
                 if (f?.m_item != null && f.m_item.m_shared.m_name == item.m_shared.m_name)
-                { f.m_time = f.m_item.m_shared.m_foodBurnTime * 1.2f; break; }
+                { f.m_time = f.m_item.m_shared.m_foodBurnTime * mult; break; }
+        }
+    }
+
+    // Rested duration — the Survival axis scales the rested buff's TTL. UpdateTTL sets m_ttl (and zeroes m_time) only
+    // when it freshly (re)computes the duration; we scale that fresh value. SE_Rested is a local player buff → MP-correct.
+    [HarmonyPatch(typeof(SE_Rested), "UpdateTTL")]
+    internal static class Boon_RestedDuration
+    {
+        static void Postfix(SE_Rested __instance)
+        {
+            if (!BoonCfg.Enabled || BoonStats.RestedMul == 1f || __instance == null) return;
+            if (!(__instance.m_character is Player pl) || pl != Player.m_localPlayer) return;
+            if (Traverse.Create(__instance).Field("m_time").GetValue<float>() != 0f) return;   // only when UpdateTTL freshly set m_ttl (it zeroes m_time)
+            float baseTtl = __instance.m_baseTTL + (pl.GetComfortLevel() - 1) * __instance.m_TTLPerComfortLevel;
+            __instance.m_ttl = baseTtl * BoonStats.RestedMul;
+        }
+    }
+
+    // Block force (BlockForce axis + Defense general): scale a shield's block power. GetBlockPower is the single source
+    // feeding BlockAttack, stagger, and tooltips. Block is resolved on the blocker's own client, and only the local
+    // player's shield is queried for the local player's blocks on this client → scaling here is MP-correct.
+    [HarmonyPatch(typeof(ItemDrop.ItemData), nameof(ItemDrop.ItemData.GetBlockPower), new[] { typeof(int), typeof(float) })]
+    internal static class Boon_BlockForce
+    {
+        static void Postfix(ref float __result)
+        {
+            if (!BoonCfg.Enabled || BoonStats.BlockForceMul == 1f || Player.m_localPlayer == null) return;
+            __result *= BoonStats.BlockForceMul;
+        }
+    }
+
+    // Per-skill level — WoodCutting + Pickaxes axes add flat skill levels (same idea as Sneak, but our single SE only
+    // has one skill slot, so these ride a GetSkillLevel patch instead). Local player's Skills only → MP-correct.
+    [HarmonyPatch(typeof(Skills), "GetSkillLevel")]
+    internal static class Boon_GatherSkills
+    {
+        static void Postfix(Skills __instance, Skills.SkillType skillType, ref float __result)
+        {
+            if (!BoonCfg.Enabled) return;
+            var pl = Traverse.Create(__instance).Field("m_player").GetValue<Player>();
+            if (pl == null || pl != Player.m_localPlayer) return;
+            int add = skillType == Skills.SkillType.WoodCutting ? BoonStats.WoodLvl
+                    : skillType == Skills.SkillType.Pickaxes   ? BoonStats.PickLvl : 0;
+            if (add != 0) __result = Mathf.Max(0f, __result + add);
         }
     }
 
