@@ -477,9 +477,9 @@ namespace EnvReporter
                 {
                     var head = raw.Split('|');
                     st.Level = int.Parse(head[0]); st.Xp = int.Parse(head[1]); st.Pending = int.Parse(head[2]);
-                    if (head.Length > 3 && head[3].Length > 0)
-                        foreach (var chunk in head[3].Split(';'))
-                            if (chunk.Length > 0) st.Boons.Add(Boon.Deserialize(chunk));
+                    // boons are '|'-separated fields from index 3 on (';' is used WITHIN a boon for its axis rolls)
+                    for (int i = 3; i < head.Length; i++)
+                        if (head[i].Length > 0) st.Boons.Add(Boon.Deserialize(head[i]));
                 }
                 catch (Exception e) { Plugin.Log?.LogWarning($"[Pilgrim] boon load failed: {e.Message}"); }
             }
@@ -489,8 +489,10 @@ namespace EnvReporter
         public void Save(Player p)
         {
             if (p == null || p.m_customData == null) return;
-            string boons = string.Join(";", Boons.Select(b => b.Serialize()));
-            p.m_customData[Key] = $"{Level}|{Xp}|{Pending}|{boons}";
+            // Level|Xp|Pending|boon|boon|...  — boons separated by '|' (never emitted by Boon.Serialize)
+            var parts = new List<string> { Level.ToString(), Xp.ToString(), Pending.ToString() };
+            parts.AddRange(Boons.Select(b => b.Serialize()));
+            p.m_customData[Key] = string.Join("|", parts);
         }
 
         public void AddXp(int amount)
