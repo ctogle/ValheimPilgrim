@@ -22,3 +22,4 @@
 | 0.5.5   | Valheim 1.0 compatibility |
 | 0.5.6   | Fix Pilgrim's Cache close NullRef (nview/AzuAutoStore); restore ritual VFX sound; all keybinds configurable (cart release now Q); co-op fix — crop/tame/repair blessings affect objects owned by other players |
 | 0.5.7   | Extended hammer reach — configurable multiplier (default 4×) for placing, removing, and copying build pieces |
+| 0.6.0   | Boon progression (experimental, not yet balanced) — kills grant XP, each level draws from stat-shaping boons and 15 game-changing keystones, all lost on death; ship deck fires — mount a fire pit or light a resin torch |

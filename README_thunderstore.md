@@ -5,11 +5,12 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
 1. Activate forsaken powers from any item stand.
 2. Sleep without changing spawn location.
 3. Cart upgrades - more storage, map tracking, hand brake and quick release that don't require loving eye contact with the cart.
-4. Ship upgrades - more storage, map tracking, no damage without nearby player.
+4. Ship upgrades - more storage, map tracking, no damage without nearby player, and a deck fire (mounted fire pit or resin torch).
 5. Pilgrim's Cache - portable, upgradeable storage for a little bit of anything.
 6. Instant weapon swap while sprinting or blocking.
 7. Extended hammer reach - configurable multiplier for placing, removing, and copying build pieces.
-8. Fire offering rituals:
+8. Boon progression (experimental - not yet balanced) - kills grant experience; each level lets you draw from stat-shaping boons and rare game-changing keystones. All boons are lost on death.
+9. Fire offering rituals:
    - Seek the next altar
    - Seek your bed
    - Seek a merchant
