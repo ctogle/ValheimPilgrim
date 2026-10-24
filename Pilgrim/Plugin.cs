@@ -7755,22 +7755,22 @@ namespace EnvReporter
         public float  XpCurveGrowth     { get; set; } = 1.05f;
         public int    DrawCount         { get; set; } = 3;
         public int    Rerolls           { get; set; } = 1;
-        public string LevelUpVfx        { get; set; } = "fx_frozenking_aspectspawn density=3; sfx_dverger_heal_start; sfx_dverger_heal_finish delay=1.5";
+        public string LevelUpVfx        { get; set; } = "fx_frozenking_aspectspawn density=6 scale=0.55 lifetime=0.7; sfx_dverger_heal_start delay=0.5; sfx_dverger_heal_finish delay=1.9";
         public float  LevelUpVfxDensity { get; set; } = 1.5f;
         public string PickSfx           { get; set; } = "sfx_frozenking_charge_whoosh";   // extra sound when a boon is picked
         public string ToggleSfx         { get; set; } = "";   // sound when opening the sheet / boon panel (find w/ pilgrim_vfx_list)
         public string ChooserCardSprite { get; set; } = "crafting_panel_bkg"; // card bg sprite (blank = native button); browse with F8
         public string ChooserPanelSprite { get; set; } = "woodpanel_settings"; // boon panel bg (blank = same as sheet)
-        public float  SheetScale         { get; set; } = 1.1f; // overall character-sheet scale
-        public float  ChooserPanelZoom  { get; set; } = 1.2f;
+        public float  SheetScale         { get; set; } = 1f;   // overall character-sheet scale
+        public float  ChooserPanelZoom  { get; set; } = 1f;
         public string BoonAlert         { get; set; } = "ping"; // pulse|throb|bob|spin|shake|ping
         public float  XpBarWidth        { get; set; } = 10f;
         public float  XpBarNudgeX       { get; set; } = 0f;
         public float  XpBarNudgeY       { get; set; } = 0f;
         public string SheetToggleKey    { get; set; } = "Y";
         public string SheetPanelSprite  { get; set; } = "woodpanel_highres";
-        public string SheetSidecarSprite { get; set; } = "";   // legendaries sidecar sprite (blank = same as sheet)
-        public float  SheetPanelZoom    { get; set; } = 1.5f;
+        public string SheetSidecarSprite { get; set; } = "woodpanel_password";   // legendaries sidecar sprite (blank = same as sheet)
+        public float  SheetPanelZoom    { get; set; } = 1f;
         // --- legendaries (Unique tier) ---
         public float  LegendaryChance   { get; set; } = 0.20f;   // per card slot: chance to roll a keystone instead of a give/take boon
         public float  AttrW1            { get; set; } = 40f;     // numeric boon: relative weight to roll 1 attribute
@@ -7895,8 +7895,8 @@ namespace EnvReporter
     {
         public bool  Enabled        { get; set; } = true;
         public bool  WeightContents { get; set; } = true;
-        public float WeightScale    { get; set; } = 1f;
-        public bool  SurvivesDeath  { get; set; } = false;
+        public float WeightScale    { get; set; } = 0.5f;
+        public bool  SurvivesDeath  { get; set; } = true;
     }
 
     public class CartsConfig
@@ -7928,7 +7928,7 @@ namespace EnvReporter
     {
         public bool  Enabled        { get; set; } = true;
         public bool  NoDamageFilter { get; set; } = true;
-        public float NoDamageRadius { get; set; } = 10f;
+        public float NoDamageRadius { get; set; } = 30f;
 
         // Deck fire pit — a real fire_pit_iron the player mounts by interacting with the mast
         // (costs one fire_pit_iron item, refunded on removal). Longship + Ashlands drakkar only.
