@@ -179,28 +179,23 @@ namespace EnvReporter
         // ── Pilgrim's Cache (portable metal crate) ──────────────────────────────
         internal const string CratePrefabName = "PilgrimCrate";
         internal const string CrateDataKey    = "pilgrim_crate";
-
-        internal static string EnsureCrateId(ItemDrop.ItemData item)
-        {
-            if (string.IsNullOrEmpty(item.m_crafterName) || !item.m_crafterName.StartsWith("PC_"))
-                item.m_crafterName = "PC_" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
-            return item.m_crafterName;
-        }
-
-        internal static string CratePlayerKey(ItemDrop.ItemData item) =>
-            "pilgrim_crate_" + EnsureCrateId(item);
+        // Fixed player-level key (one cache per player). The old id-based key relied on m_crafterName, but
+        // ItemData.Save only persists m_crafterName when m_crafterID != 0 — which we never set — so the id was
+        // dropped on relog and the mirror orphaned. A fixed key always matches; player.m_customData reliably
+        // persists (vanilla player data; survives with or without ServerCharacters).
+        internal const string CrateContentsKey = "pilgrim_crate_contents";
 
         internal static void WriteCrate(Player player, ItemDrop.ItemData item, string b64)
         {
-            item.m_customData[CrateDataKey] = b64;
-            player.m_customData[CratePlayerKey(item)] = b64;
+            item.m_customData[CrateDataKey] = b64;          // travels with the item (ItemDrop ZDO / inventory)
+            player.m_customData[CrateContentsKey] = b64;    // durable personal mirror (fixed key, always matches)
         }
 
         internal static string? ReadCrate(Player player, ItemDrop.ItemData item)
         {
             if (item.m_customData.TryGetValue(CrateDataKey, out var b64) && !string.IsNullOrEmpty(b64))
                 return b64;
-            player.m_customData.TryGetValue(CratePlayerKey(item), out var fallback);
+            player.m_customData.TryGetValue(CrateContentsKey, out var fallback);
             return fallback;
         }
         internal static readonly string[] CrateMetals =
@@ -6999,6 +6994,21 @@ namespace EnvReporter
         }
     }
 
+    // Inventory load resolves items by HASH, not name. After a relog the ObjectDB hash table is rebuilt and can
+    // lose our manually-injected crate entry → "Failed to find item prefab <hash>" and the cache item is dropped.
+    // _cratePrefabGo is DontDestroyOnLoad so it survives; return it for the crate's hash to prevent the drop.
+    [HarmonyPatch(typeof(ObjectDB), "GetItemPrefab", typeof(int))]
+    static class CrateGetItemPrefabHashPatch
+    {
+        static int _crateHash, _nameHash;
+        static void Postfix(int hash, ref GameObject __result)
+        {
+            if (__result != null || Plugin._cratePrefabGo == null) return;
+            if (_crateHash == 0) { _crateHash = Plugin.CratePrefabName.GetStableHashCode(); _nameHash = "Pilgrim's Cache".GetStableHashCode(); }
+            if (hash == _crateHash || hash == _nameHash) __result = Plugin._cratePrefabGo;
+        }
+    }
+
     [HarmonyPatch(typeof(ZNetScene), "Awake")]
     static class CrateZNetScenePatch
     {
@@ -7525,7 +7535,6 @@ namespace EnvReporter
                 player.Message(MessageHud.MessageType.Center, "You can only carry one Pilgrim's Cache.");
                 return false;
             }
-            Plugin.EnsureCrateId(drop.m_itemData);
             return true;
         }
     }

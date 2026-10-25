@@ -179,7 +179,7 @@ namespace EnvReporter
             [BoonAxis.Parry]       = new AxisDef { GiveAdj="Deflecting",GiveNoun="the Parry",  TakeAdj="Open",       TakeNoun="the Opening",Noun="parry bonus",   Percent=true },
             [BoonAxis.EitrRegen]   = new AxisDef { GiveAdj="Attuned",   GiveNoun="the Flow",   TakeAdj="Dim",        TakeNoun="the Dimming",Noun="eitr regen",    Percent=true },
             [BoonAxis.SwimSpeed]   = new AxisDef { GiveAdj="Gliding",   GiveNoun="the Current",TakeAdj="Dragging",   TakeNoun="the Drag",   Noun="swim speed",    Percent=true },
-            [BoonAxis.Stealth]     = new AxisDef { GiveAdj="Unseen",    GiveNoun="the Veil",   TakeAdj="Conspicuous",TakeNoun="the Glare",  Noun="sneak skill",   Percent=false },
+            [BoonAxis.Stealth]     = new AxisDef { GiveAdj="Unseen",    GiveNoun="the Veil",   TakeAdj="Conspicuous",TakeNoun="the Glare",  Noun="sneak",         Percent=false },
             [BoonAxis.CarryWeight] = new AxisDef { GiveAdj="Mighty",    GiveNoun="the Ox",     TakeAdj="Overladen",  TakeNoun="the Load",   Noun="carry weight",  Percent=false },
             [BoonAxis.BuildStamina]= new AxisDef { GiveAdj="Industrious",GiveNoun="the Craft",TakeAdj="Toilsome",   TakeNoun="the Labor",  Noun="build stamina use",Percent=true, Cost=true },
             [BoonAxis.StaminaUse]  = new AxisDef { GiveAdj="Fluid",     GiveNoun="Grace",      TakeAdj="Labored",    TakeNoun="Toil",       Noun="stamina use",   Percent=true, Cost=true, General=true },

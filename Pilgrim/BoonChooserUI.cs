@@ -196,6 +196,8 @@ namespace EnvReporter
         void Update()
         {
             bool show = BoonCfg.Enabled && BoonHud.Choosing && BoonHud.Offer != null;
+            // relog / scene-reload destroys the game canvas our root hangs under → rebuild (see CharSheet.Update)
+            if (_built && _root == null) _built = false;
             if (!_built) { if (!show) return; BuildUI(); }
             _root.SetActive(show);
             if (show && !_wasShown) _hoverSettle = 4;   // recheck hover for a few frames after open (layout/cursor settle)
