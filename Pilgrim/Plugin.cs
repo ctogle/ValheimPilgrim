@@ -12,7 +12,7 @@ using YamlDotNet.RepresentationModel;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.5.7")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.6.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
