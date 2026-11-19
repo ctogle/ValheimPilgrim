@@ -27,6 +27,7 @@ namespace EnvReporter
         }
 
         Canvas _canvas;
+        CanvasGroup _group;
         TMP_FontAsset _font;
         Sprite _white, _grad, _diamond;
         RectTransform _barBg;
@@ -112,6 +113,7 @@ namespace EnvReporter
             _canvas = cgo.AddComponent<Canvas>();
             _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
             _canvas.sortingOrder = 5000;
+            _group = cgo.AddComponent<CanvasGroup>();   // alpha mirrors the HUD's death/teleport black-screen fade
             var scaler = cgo.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize; scaler.scaleFactor = 1f;
             cgo.AddComponent<GraphicRaycaster>();
@@ -140,12 +142,30 @@ namespace EnvReporter
             _iconImg.raycastTarget = true;                        // clickable: toggles the boon chooser
             var iconBtn = _iconImg.gameObject.AddComponent<Button>();
             iconBtn.transition = Selectable.Transition.None;
+            // 0.6.1: click the XP diamond = open/close the boon chooser (ToggleDraw no-ops when Pending==0).
+            // (Only reachable when a cursor is already up, e.g. inventory open — so keep it to the boon panel.)
             iconBtn.onClick.AddListener(() => BoonHud.ToggleDraw());
             _iconRt = _iconImg.rectTransform; _iconRt.pivot = new Vector2(0.5f, 0.5f);
             _iconRt.anchorMin = _iconRt.anchorMax = new Vector2(0, 0);
             _iconTxt = NewText("XpLabel", _iconRt, 14, new Color(0.14f, 0.10f, 0.04f));
             _iconTxt.text = "XP"; _iconTxt.fontStyle = FontStyles.Bold;
             var lt = _iconTxt.rectTransform; lt.anchorMin = Vector2.zero; lt.anchorMax = Vector2.one; lt.offsetMin = Vector2.zero; lt.offsetMax = Vector2.zero;
+            // 0.6.1: hover hint — symmetric, key-referenced; parented to the icon so it tracks layout
+            var tip = NewText("XpTip", _iconRt, 12, GoldHi);
+            tip.text = $"[B] boons   [{CharSheetCfg.ToggleKey}] sheet";
+            tip.fontStyle = FontStyles.Bold; tip.enableWordWrapping = false; tip.alignment = TextAlignmentOptions.Left;
+            tip.outlineColor = Color.black; tip.outlineWidth = 0.2f;
+            // below-and-right of the diamond so it never runs off the top/left edge
+            var trt = tip.rectTransform; trt.pivot = new Vector2(0f, 1f); trt.anchorMin = trt.anchorMax = new Vector2(1f, 0f);
+            trt.sizeDelta = new Vector2(220f, 20f); trt.anchoredPosition = new Vector2(4f, -4f);
+            tip.gameObject.SetActive(false);
+            var et = _iconImg.gameObject.AddComponent<UnityEngine.EventSystems.EventTrigger>();
+            var tEnter = new UnityEngine.EventSystems.EventTrigger.Entry { eventID = UnityEngine.EventSystems.EventTriggerType.PointerEnter };
+            tEnter.callback.AddListener(_ => { if (tip != null) tip.gameObject.SetActive(true); });
+            et.triggers.Add(tEnter);
+            var tExit = new UnityEngine.EventSystems.EventTrigger.Entry { eventID = UnityEngine.EventSystems.EventTriggerType.PointerExit };
+            tExit.callback.AddListener(_ => { if (tip != null) tip.gameObject.SetActive(false); });
+            et.triggers.Add(tExit);
             _count = NewText("XpCount", root, 12, GoldHi);
             _count.rectTransform.pivot = new Vector2(0, 0.5f); _count.rectTransform.anchorMin = _count.rectTransform.anchorMax = new Vector2(0, 0);
 
@@ -166,13 +186,22 @@ namespace EnvReporter
         void Update()
         {
             var st = BoonHud.State; var p = Player.m_localPlayer;
-            // mirror the vanilla HUD: hide while teleporting / HUD hidden / loading, like the other bars
-            bool hudShown = Hud.instance != null && Hud.instance.m_rootObject != null
-                            && Hud.instance.m_rootObject.activeInHierarchy;
-            bool show = BoonCfg.Enabled && p != null && st != null && hudShown && !p.IsTeleporting();
+            // 0.6.1: mirror the HEALTH bar's actual visibility. The game doesn't deactivate the HUD — Hud.SetVisible
+            // MOVES m_rootObject off-screen — so activeInHierarchy stays true even when hidden (why the XP bar showed
+            // during the intro/cutscene while other bars didn't). The real rule (Hud.Update) is:
+            //   !Hud.IsUserHidden() && !localPlayer.InCutscene()   (+ our existing !teleporting)
+            bool hudShown = Hud.instance != null && !Hud.IsUserHidden()
+                            && p != null && !p.InCutscene();
+            bool show = BoonCfg.Enabled && p != null && st != null && hudShown;
             if (!_built) { if (!show) return; Build(); }
             _canvas.gameObject.SetActive(show);
             if (!show) return;
+            // Ride the SAME black-screen fade that occludes the health/food bars. Hud.m_loadingScreen is a full-
+            // screen black CanvasGroup that fades IN (alpha 0→1) on death/teleport/sleep/shutdown; the real bars
+            // don't hide, they get covered by it. Our canvas renders above it, so instead mirror its alpha — fade
+            // our bar out in lockstep (1 - loadingAlpha) so it vanishes exactly as the screen goes black, not before.
+            float blackAlpha = Hud.instance != null && Hud.instance.m_loadingScreen != null ? Hud.instance.m_loadingScreen.alpha : 0f;
+            if (_group != null) _group.alpha = Mathf.Clamp01(1f - blackAlpha);
 
             float barW = BoonCfg.XpBarWidth, gap = 6f;
             float left, bottom, h;

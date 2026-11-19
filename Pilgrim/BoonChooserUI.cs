@@ -39,6 +39,8 @@ namespace EnvReporter
         int _hoverIdx = -1;   // which card the cursor is over (-1 = none)
         Button _rerollBtn;
         TextMeshProUGUI _rerollLabel;
+        TextMeshProUGUI _rerollTip;
+        bool _rerollHover;
 
         class BoonBtn { public Button btn; public Image bg; public Image hi; public Image halo; public Image[] border; public TextMeshProUGUI rarity, name; public TextMeshProUGUI[] lines; }
         readonly BoonBtn[] _boons = new BoonBtn[3];
@@ -97,7 +99,17 @@ namespace EnvReporter
                 rt.sizeDelta = new Vector2(180, REROLL_H); rt.anchoredPosition = new Vector2(0, -(panelH / 2f - PAD - REROLL_H / 2f));
                 _rerollBtn.onClick.AddListener(() => BoonHud.DoReroll());
                 _rerollLabel = _rerollBtn.GetComponentInChildren<TextMeshProUGUI>();
+                var ret = _rerollBtn.gameObject.AddComponent<EventTrigger>();
+                AddTrigger(ret, EventTriggerType.PointerEnter, () => _rerollHover = true);
+                AddTrigger(ret, EventTriggerType.PointerExit, () => _rerollHover = false);
             }
+
+            // tooltip shown when hovering a disabled reroll button (no rerolls banked) — sits to the RIGHT of the button
+            _rerollTip = UiKit.Text("RerollTip", _panel.transform, 18, UiKit.Gold, TextAlignmentOptions.Left);
+            _rerollTip.text = "Rewarded for surviving raids";
+            Place(_rerollTip.rectTransform, new Vector2(0.5f, 0.5f), new Vector2(260f, REROLL_H),
+                  new Vector2(90f + 12f + 130f, -(panelH / 2f - PAD - REROLL_H / 2f)));
+            _rerollTip.gameObject.SetActive(false);
 
             _built = true;
         }
@@ -267,6 +279,7 @@ namespace EnvReporter
             }
             if (_rerollLabel != null) _rerollLabel.text = $"Reroll ({BoonHud.RerollsLeft})";
             if (_rerollBtn != null) _rerollBtn.interactable = BoonHud.RerollsLeft > 0;
+            if (_rerollTip != null) _rerollTip.gameObject.SetActive(_rerollHover && BoonHud.RerollsLeft == 0);
         }
     }
 }

@@ -42,6 +42,7 @@ namespace EnvReporter
         internal static float  XpHealthRef       => C.XpHealthRef;
         internal static int    DrawCount         => C.DrawCount;
         internal static int    Rerolls           => C.Rerolls;
+        internal static int    RerollCap         => C.RerollCap;
         internal static string LevelUpVfx        => C.LevelUpVfx;
         internal static float  LevelUpVfxDensity => C.LevelUpVfxDensity;
         internal static string PickSfx           => C.PickSfx;
@@ -81,6 +82,7 @@ namespace EnvReporter
             KeystoneId.Temerity => C.TemerityEnabled,
             KeystoneId.Contempt => C.ContemptEnabled,
             KeystoneId.Pyrrhic => C.PyrrhicEnabled,
+            KeystoneId.Euthanasia => C.EuthanasiaEnabled,
             _ => true,
         };
         // xp to go from level L -> L+1 (gentle exponential so leveling stays regular as per-kill XP grows with biome)
@@ -89,7 +91,7 @@ namespace EnvReporter
     }
 
     // ---- legendaries: "keystones" (the Unique tier). Each is a named on/off effect with its own Harmony hook. ----
-    internal enum KeystoneId { None = 0, Grief = 1, Grace = 2, Conviction = 3, Sonder = 4, Dread = 5, Avarice = 6, Regret = 7, Resent = 8, Wrath = 9, Betrayal = 10, Panic = 11, Nostalgia = 12, Temerity = 13, Contempt = 14, Pyrrhic = 15 }   // append new ids at the END (persisted)
+    internal enum KeystoneId { None = 0, Grief = 1, Grace = 2, Conviction = 3, Sonder = 4, Dread = 5, Avarice = 6, Regret = 7, Resent = 8, Wrath = 9, Betrayal = 10, Panic = 11, Nostalgia = 12, Temerity = 13, Contempt = 14, Pyrrhic = 15, Euthanasia = 16 }   // append new ids at the END (persisted)
 
     // Desc = flowery card text; Sheet = plain effect text for the character sheet.
     internal sealed class KeystoneDef { public KeystoneId Id; public string Name, Desc, Sheet; }
@@ -113,6 +115,7 @@ namespace EnvReporter
             [KeystoneId.Temerity]  = new KeystoneDef { Id = KeystoneId.Temerity,  Name = "Temerity",  Desc = "You ignore the warnings of danger",     Sheet = "Grants 2x blunt damage" },
             [KeystoneId.Contempt]  = new KeystoneDef { Id = KeystoneId.Contempt,  Name = "Contempt",  Desc = "Your voice is hatred transcending diction", Sheet = "Grants 2x pierce damage" },
             [KeystoneId.Pyrrhic]   = new KeystoneDef { Id = KeystoneId.Pyrrhic,   Name = "Pyrrhic",   Desc = "You'll stand at the table while blood fills your shoes", Sheet = "Grants favorable boon rolls" },
+            [KeystoneId.Euthanasia]= new KeystoneDef { Id = KeystoneId.Euthanasia,Name = "Euthanasia",Desc = "You are the lessons of death",         Sheet = "Your blows slay foes below 20% health" },
         };
         internal static readonly KeystoneId[] All = Def.Keys.ToArray();
         internal static bool Available(KeystoneId id) => Def.ContainsKey(id) && BoonCfg.LegendaryEnabled(id);
@@ -258,6 +261,11 @@ namespace EnvReporter
         // from the dedicated resistance branch, always paired resist/weak).
         internal static readonly BoonAxis[] NumericAxes = All.Where(a => !Def[a].Categorical).ToArray();
 
+        // axes that can actually be ROLLED. ResSpirit is excluded: no vanilla enemy deals spirit damage to a
+        // player, so a spirit *resistance* is always a dud. Its AxisDef stays (DmgSpirit is useful, and any
+        // already-owned ResSpirit boon still renders/applies) — it just won't come up in new draws.
+        internal static readonly BoonAxis[] Rollable = All.Where(a => a != BoonAxis.ResSpirit).ToArray();
+
         // the 8 per-type resistance axes
         internal static readonly BoonAxis[] ResistAxes =
         {
@@ -266,20 +274,23 @@ namespace EnvReporter
         };
 
         // net points → damage category (give/positive = resist ladder, take/negative = weak ladder)
-        // Boons cap at Very resistant — Immune (full negation) is intentionally out of reach.
+        // Ladder 3/6/10 (was 1/4/7): a single 0–10 roll can no longer hand out VeryResistant (needs net 10,
+        // i.e. a perfect roll or stacking two attributes). Immune (full negation) stays out of reach.
         internal static HitData.DamageModifier Category(int net) =>
-            net >= 7  ? HitData.DamageModifier.VeryResistant
-          : net >= 4  ? HitData.DamageModifier.Resistant
-          : net >= 1  ? HitData.DamageModifier.SlightlyResistant
-          : net <= -7 ? HitData.DamageModifier.VeryWeak
-          : net <= -4 ? HitData.DamageModifier.Weak
-          : net <= -1 ? HitData.DamageModifier.SlightlyWeak
+            net >= 10 ? HitData.DamageModifier.VeryResistant
+          : net >= 6  ? HitData.DamageModifier.Resistant
+          : net >= 3  ? HitData.DamageModifier.SlightlyResistant
+          : net <= -10 ? HitData.DamageModifier.VeryWeak
+          : net <= -6 ? HitData.DamageModifier.Weak
+          : net <= -3 ? HitData.DamageModifier.SlightlyWeak
           :             HitData.DamageModifier.Normal;
 
-        // human text for a category net (positive = resist, negative = weak)
+        // human text for a category net (positive = resist, negative = weak) — must match Category()'s ladder
         internal static string CatText(int net) =>
-            net >= 7 ? "Very resistant" : net >= 4 ? "Resistant" : net >= 1 ? "Slightly resistant"
-          : net <= -7 ? "Very weak" : net <= -4 ? "Weak" : net <= -1 ? "Slightly weak" : "";
+            net >= 10 ? "Very resistant" : net >= 6 ? "Resistant" : net >= 3 ? "Slightly resistant"
+          : net <= -10 ? "Very weak" : net <= -6 ? "Weak" : net <= -3 ? "Slightly weak" : "";
+
+        internal const int ResistFloor = 3;   // minimum |net| for a categorical roll to have any effect
     }
 
     // ---- one axis on a rolled boon (Net > 0 = give, Net < 0 = take) -----------
@@ -382,11 +393,11 @@ namespace EnvReporter
         {
             bool pyr = PyrrhicActive();
             float tot = 0f;
-            foreach (var a in Axes.All) tot += WeightOf(a, pyr);
-            if (tot <= 0f) return Axes.All[Rng.Next(Axes.All.Length)];
+            foreach (var a in Axes.Rollable) tot += WeightOf(a, pyr);
+            if (tot <= 0f) return Axes.Rollable[Rng.Next(Axes.Rollable.Length)];
             double r = Rng.NextDouble() * tot;
-            foreach (var a in Axes.All) { r -= WeightOf(a, pyr); if (r < 0) return a; }
-            return Axes.All[Axes.All.Length - 1];
+            foreach (var a in Axes.Rollable) { r -= WeightOf(a, pyr); if (r < 0) return a; }
+            return Axes.Rollable[Axes.Rollable.Length - 1];
         }
 
         static Boon RollNumeric()
@@ -403,9 +414,13 @@ namespace EnvReporter
             }
             var b = new Boon();
             foreach (var kv in net) if (kv.Value != 0) b.Rolls.Add(new AxisRoll { Axis = kv.Key, Net = kv.Value });
-            // single-axis boons never net ≤ 0 (clamp the gift to beat the cost)
-            if (b.Rolls.Count == 1 && b.Rolls[0].Net < 1) b.Rolls[0] = new AxisRoll { Axis = b.Rolls[0].Axis, Net = 1 };
-            if (b.Rolls.Count == 0) b.Rolls.Add(new AxisRoll { Axis = PickAxis(), Net = 1 });
+            // categorical (resistance) rolls below ±ResistFloor map to Normal — no effect, and would render blank → drop them
+            b.Rolls.RemoveAll(r => Axes.Def[r.Axis].Categorical && Math.Abs(r.Net) < Axes.ResistFloor);
+            // guarantee a meaningful single gift: base axis ≥ +1, categorical ≥ +ResistFloor (Slightly resistant)
+            int FloorFor(BoonAxis a) => Axes.Def[a].Categorical ? Axes.ResistFloor : 1;
+            if (b.Rolls.Count == 0) { var ax = PickAxis(); b.Rolls.Add(new AxisRoll { Axis = ax, Net = FloorFor(ax) }); }
+            else if (b.Rolls.Count == 1 && b.Rolls[0].Net < FloorFor(b.Rolls[0].Axis))
+                b.Rolls[0] = new AxisRoll { Axis = b.Rolls[0].Axis, Net = FloorFor(b.Rolls[0].Axis) };
             b.Rarity = RarityOf(b);
             return b;
         }
@@ -465,7 +480,7 @@ namespace EnvReporter
     {
         const string Key = "pilgrim.boons.v1";
 
-        public int Level = 1, Xp = 0, Pending = 0;
+        public int Level = 1, Xp = 0, Pending = 0, BankedRerolls = 0;   // BankedRerolls: earned, cap RerollCap
         public readonly List<Boon> Boons = new();
 
         public static BoonState Load(Player p)
@@ -477,8 +492,11 @@ namespace EnvReporter
                 {
                     var head = raw.Split('|');
                     st.Level = int.Parse(head[0]); st.Xp = int.Parse(head[1]); st.Pending = int.Parse(head[2]);
-                    // boons are '|'-separated fields from index 3 on (';' is used WITHIN a boon for its axis rolls)
-                    for (int i = 3; i < head.Length; i++)
+                    // backward-compat: a comma-free int at [3] is BankedRerolls (Boon.Serialize always has commas)
+                    int bi = 3;
+                    if (head.Length > 3 && !head[3].Contains(",") && int.TryParse(head[3], out var br)) { st.BankedRerolls = br; bi = 4; }
+                    // boons are '|'-separated fields (';' is used WITHIN a boon for its axis rolls)
+                    for (int i = bi; i < head.Length; i++)
                         if (head[i].Length > 0) st.Boons.Add(Boon.Deserialize(head[i]));
                 }
                 catch (Exception e) { Plugin.Log?.LogWarning($"[Pilgrim] boon load failed: {e.Message}"); }
@@ -489,8 +507,8 @@ namespace EnvReporter
         public void Save(Player p)
         {
             if (p == null || p.m_customData == null) return;
-            // Level|Xp|Pending|boon|boon|...  — boons separated by '|' (never emitted by Boon.Serialize)
-            var parts = new List<string> { Level.ToString(), Xp.ToString(), Pending.ToString() };
+            // Level|Xp|Pending|BankedRerolls|boon|boon|...  — boons separated by '|' (never emitted by Boon.Serialize)
+            var parts = new List<string> { Level.ToString(), Xp.ToString(), Pending.ToString(), BankedRerolls.ToString() };
             parts.AddRange(Boons.Select(b => b.Serialize()));
             p.m_customData[Key] = string.Join("|", parts);
         }
@@ -694,7 +712,10 @@ namespace EnvReporter
             // scale by enemy max health (vs a reference) and star level (×1 base, ×2 one-star, ×3 two-star)
             float href = Mathf.Max(1f, BoonCfg.XpHealthRef);
             int star = Mathf.Max(1, __instance.GetLevel());
-            int xp = Mathf.Max(1, Mathf.RoundToInt(BoonCfg.XpPerKill * (__instance.GetMaxHealth() / href) * star));
+            // 0.6.1: log curve on health (was linear → tanky mobs/bosses spiked XP; a troll gave ~5 levels).
+            // At maxHealth==href the factor is 1 (unchanged); it compresses the high end (e.g. ~24x health -> ~4.6x).
+            float hfac = Mathf.Log(1f + __instance.GetMaxHealth() / href, 2f);
+            int xp = Mathf.Max(1, Mathf.RoundToInt(BoonCfg.XpPerKill * hfac * star));
             if (BoonHud.Owns(KeystoneId.Sonder)) xp *= 3;   // Sonder: triple experience
             st.AddXp(xp);
             st.Save(local);
@@ -727,10 +748,34 @@ namespace EnvReporter
         {
             if (!BoonCfg.Enabled || __instance == null || __instance != Player.m_localPlayer) return;
             if (BoonHud.State == null) return;
+            RaidTracker.LastDeathTime = Time.time;   // raid-survival reroll checks this against the raid window
             BoonHud.ForceClose();
             BoonHud.State.Respec();
             BoonHud.State.Save(__instance);
             BoonStats.Apply(__instance, BoonHud.State);   // strip boon modifiers back to baseline
+        }
+    }
+
+    // Earn a boon reroll by surviving a raid event without dying. No freebies; banked up to RerollCap.
+    // We use a death TIMESTAMP, not a flag: client-side event state toggles as the player moves in/out of the
+    // raid area (dying teleports you out), and those transitions were clearing a flag before the real end.
+    internal static class RaidTracker { internal static float LastDeathTime = -99999f; }
+
+    [HarmonyPatch(typeof(RandEventSystem), "SetActiveEvent")]
+    internal static class Boon_RaidSurvivalReroll
+    {
+        static void Prefix(RandEventSystem __instance, RandomEvent ev, bool end)
+        {
+            if (!BoonCfg.Enabled) return;
+            var had = __instance.GetActiveEvent();
+            if (ev == null && end && had != null)   // a raid just completed naturally
+            {
+                var p = Player.m_localPlayer;
+                if (p == null || p.IsDead()) return;
+                // died during this raid's window? (raid ran ~m_duration; dying any time in it forfeits)
+                if (Time.time - RaidTracker.LastDeathTime <= had.m_duration + 2f) return;
+                BoonHud.GrantReroll();
+            }
         }
     }
 
@@ -826,6 +871,33 @@ namespace EnvReporter
             if (gd <= 0f) return;
             float room = (__instance.GetMaxHealth() - gd) - __instance.GetHealth();
             hp = room <= 0f ? 0f : Mathf.Min(hp, room);
+        }
+    }
+
+    // Euthanasia — "You are the lessons of death." Your blows execute monsters below 20% health.
+    // ApplyDamage runs on the target's owner (server for monsters); read the attacker's keystone off their ZDO
+    // (KeystoneNet.Has) like Grief/Betrayal → owner-authoritative in MP. Bosses exempt.
+    [HarmonyPatch(typeof(Character), "ApplyDamage")]
+    internal static class Euthanasia_Execute
+    {
+        static bool _executing;   // re-entrancy guard: the finishing blow calls Damage → ApplyDamage again
+        static void Postfix(Character __instance, HitData hit)
+        {
+            if (_executing) return;
+            if (!BoonCfg.Enabled || !BoonCfg.LegendaryEnabled(KeystoneId.Euthanasia)) return;
+            if (__instance == null || __instance is Player || hit == null) return;   // monsters only
+            if (__instance.IsBoss()) return;                                         // bosses exempt
+            if (!(hit.GetAttacker() is Player atk) || !KeystoneNet.Has(atk, KeystoneId.Euthanasia)) return;
+            float hp = __instance.GetHealth();
+            if (hp <= 0f || hp > __instance.GetMaxHealth() * 0.20f) return;          // only below 20%, still alive
+            var kill = new HitData();
+            kill.m_damage.m_damage = __instance.GetMaxHealth() * 10f;
+            kill.m_point = __instance.transform.position;
+            kill.m_dir = hit.m_dir;
+            kill.SetAttacker(atk);                                                   // credit the kill (OnDeath/XP/drops)
+            _executing = true;
+            try { __instance.Damage(kill); }
+            finally { _executing = false; }
         }
     }
 
@@ -1081,7 +1153,6 @@ namespace EnvReporter
         static BoonHud _inst;
 
         List<Boon> _offer;
-        int _rerolls;
         bool _choosing;
         int _lastLevel = -1;
         float _applyTimer, _blink;
@@ -1109,14 +1180,34 @@ namespace EnvReporter
         // ---- state exposed to the uGUI chooser (BoonChooserUI) ----
         internal static bool Choosing => _inst != null && _inst._choosing;
         internal static List<Boon> Offer => _inst?._offer;
-        internal static int RerollsLeft => _inst?._rerolls ?? 0;
+        internal static int RerollsLeft => State?.BankedRerolls ?? 0;
         internal static void PickIndex(int i)
         {
             if (_inst?._offer != null && i >= 0 && i < _inst._offer.Count) _inst.Choose(_inst._offer[i]);
         }
         internal static void DoReroll()
         {
-            if (_inst != null && _inst._rerolls > 0) { _inst._rerolls--; _inst._offer = BoonRoller.Draw(); }
+            if (_inst != null && State != null && State.BankedRerolls > 0)
+            {
+                State.BankedRerolls--; State.Save(Player.m_localPlayer);
+                _inst._offer = BoonRoller.Draw();
+            }
+        }
+        // earn a reroll (capped); called on raid survival
+        internal static void GrantReroll()
+        {
+            if (State == null) return;
+            if (State.BankedRerolls >= BoonCfg.RerollCap) return;
+            State.BankedRerolls++; State.Save(Player.m_localPlayer);
+            // the vanilla raid-end banner fires the same frame and clobbers a Center message — delay ours past it
+            string msg = $"The gods reward your vigor — boon reroll earned ({State.BankedRerolls}/{BoonCfg.RerollCap})";
+            if (_inst != null) _inst.StartCoroutine(DelayedMessage(4f, msg));
+            else Player.m_localPlayer?.Message(MessageHud.MessageType.Center, msg);
+        }
+        static System.Collections.IEnumerator DelayedMessage(float delay, string msg)
+        {
+            yield return new WaitForSeconds(delay);
+            Player.m_localPlayer?.Message(MessageHud.MessageType.Center, msg);
         }
         // clicking the xp icon toggles the chooser (open if boons are pending, else close)
         internal static void ToggleDraw()
@@ -1126,10 +1217,11 @@ namespace EnvReporter
             else if (State != null && State.Pending > 0) _inst.OpenDraw();
         }
 
-        // suppress hotkeys while typing in console/chat or a menu is open
+        // suppress hotkeys while typing in console/chat, a menu is open, or the large map is up
         static bool Typing() =>
             Console.IsVisible() || Menu.IsVisible() || TextInput.IsVisible()
-            || (Chat.instance != null && Chat.instance.HasFocus());
+            || (Chat.instance != null && Chat.instance.HasFocus())
+            || (Minimap.instance != null && Minimap.instance.m_mode == Minimap.MapMode.Large);
 
         Texture2D Tex(Color c) { var t = new Texture2D(1,1); t.SetPixel(0,0,c); t.Apply(); return t; }
 
@@ -1206,7 +1298,7 @@ namespace EnvReporter
         void OpenDraw()
         {
             if (State.Pending <= 0) return;
-            if (_offer == null) { _offer = BoonRoller.Draw(); _rerolls = BoonCfg.Rerolls; } // roll once per banked boon
+            if (_offer == null) _offer = BoonRoller.Draw();   // reroll currency is earned/banked, not refilled per boon
             _choosing = true; Modal = true;
             BoonFx.PlayUi(true);   // game's inventory-open sound
         }
@@ -1222,7 +1314,7 @@ namespace EnvReporter
             State.Save(Player.m_localPlayer);
             BoonStats.Apply(Player.m_localPlayer, State);
             BoonFx.PlaySound(BoonCfg.PickSfx);   // extra pick sound (e.g. coins) on top of the button click
-            if (State.Pending > 0) { _offer = BoonRoller.Draw(); _rerolls = BoonCfg.Rerolls; } // fresh roll for next boon
+            if (State.Pending > 0) _offer = BoonRoller.Draw();   // fresh roll for next boon (rerolls stay banked)
             else { _offer = null; CloseChooser(); }                                            // only close on the last one
         }
 

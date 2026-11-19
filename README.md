@@ -9,8 +9,9 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
 5. Pilgrim's Cache - portable, upgradeable storage for a little bit of anything.
 6. Instant weapon swap while sprinting or blocking.
 7. Extended hammer reach - configurable multiplier for placing, removing, and copying build pieces.
-8. Boon progression (experimental - not yet balanced) - kills grant experience; each level lets you draw from stat-shaping boons and rare game-changing keystones. All boons are lost on death.
-9. Fire offering rituals:
+8. Boon progression (experimental) - kills grant experience; each level lets you draw from stat-shaping boons and rare game-changing keystones, and surviving raids earns rerolls. All boons are lost on death.
+9. Starred monsters (1 or 2 stars) always drop their trophy.
+10. Fire offering rituals:
    - Seek the next altar
    - Seek your bed
    - Seek a merchant

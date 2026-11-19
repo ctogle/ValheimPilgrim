@@ -12,7 +12,10 @@ using YamlDotNet.RepresentationModel;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.6.0")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.6.1")]
+    // Soft-dep so BepInEx loads us AFTER ZenItemStands (when present) — otherwise its assembly isn't loaded
+    // when our Awake patches run and AccessTools.TypeByName("ZenItemStands.StandInventory") can't resolve.
+    [BepInDependency("ZenDragon.ZenItemStands", BepInDependency.DependencyFlags.SoftDependency)]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin plugin = null!;
@@ -273,6 +276,8 @@ namespace EnvReporter
         {
             var pkg   = new ZPackage();
             var items = inv.GetAllItems();
+            pkg.Write(-1);            // 0.6.1 format marker (old format wrote count>=0 here first)
+            pkg.Write(2);             // version
             pkg.Write(items.Count);
             foreach (var it in items)
             {
@@ -281,6 +286,13 @@ namespace EnvReporter
                 pkg.Write(it.m_quality);
                 pkg.Write(it.m_gridPos.x);
                 pkg.Write(it.m_gridPos.y);
+                // 0.6.1: preserve full item fidelity so caching no longer wipes stylization/etc.
+                pkg.Write(it.m_variant);
+                pkg.Write(it.m_durability);
+                pkg.Write(it.m_crafterName ?? "");
+                var cd = it.m_customData;
+                pkg.Write(cd != null ? cd.Count : 0);
+                if (cd != null) foreach (var kv in cd) { pkg.Write(kv.Key); pkg.Write(kv.Value); }
             }
             return System.Convert.ToBase64String(pkg.GetArray());
         }
@@ -291,9 +303,12 @@ namespace EnvReporter
             try
             {
                 var pkg  = new ZPackage(System.Convert.FromBase64String(b64));
-                int count = pkg.ReadInt();
                 int cols  = inv.GetWidth();
                 int rows  = inv.GetHeight();
+                int first = pkg.ReadInt();
+                bool v2   = first == -1;            // 0.6.1 format (old blobs start with count>=0)
+                if (v2) pkg.ReadInt();              // version (unused for now)
+                int count = v2 ? pkg.ReadInt() : first;
                 for (int i = 0; i < count; i++)
                 {
                     string name  = pkg.ReadString();
@@ -301,10 +316,28 @@ namespace EnvReporter
                     int    qual  = pkg.ReadInt();
                     int    gx    = Mathf.Clamp(pkg.ReadInt(), 0, cols - 1);
                     int    gy    = Mathf.Clamp(pkg.ReadInt(), 0, rows - 1);
+                    int    variant = 0; float dur = 0f; string crafter = "";
+                    var    cdata = new System.Collections.Generic.Dictionary<string, string>();
+                    if (v2)
+                    {
+                        variant = pkg.ReadInt();
+                        dur     = pkg.ReadSingle();
+                        crafter = pkg.ReadString();
+                        int cdn = pkg.ReadInt();
+                        for (int k = 0; k < cdn; k++) { var kk = pkg.ReadString(); var vv = pkg.ReadString(); cdata[kk] = vv; }
+                    }
                     if (!string.IsNullOrEmpty(name) && stack > 0)
                     {
-                        var added = inv.AddItem(name, stack, qual, 0, 0L, "", false);
-                        if (added != null) added.m_gridPos = new Vector2i(gx, gy);
+                        var added = inv.AddItem(name, stack, qual, variant, 0L, crafter, false);
+                        if (added != null)
+                        {
+                            added.m_gridPos = new Vector2i(gx, gy);
+                            if (v2)
+                            {
+                                added.m_durability = dur;
+                                if (cdata.Count > 0) added.m_customData = cdata;   // restores stylization etc.
+                            }
+                        }
                     }
                 }
             }
@@ -919,6 +952,23 @@ namespace EnvReporter
                 if (p == null || BoonHud.State == null) { args.Context.AddString("no player / boon state"); return; }
                 BoonHud.ForceClose(); BoonHud.State.Respec(); BoonHud.State.Save(p); BoonStats.Apply(p, BoonHud.State);
                 args.Context.AddString("boons reset to level 1");
+            });
+            new Terminal.ConsoleCommand("pilgrim_boon_keystone", "grant a keystone by name (e.g. Euthanasia); no arg lists them", args =>
+            {
+                var p = Player.m_localPlayer;
+                if (p == null || BoonHud.State == null) { args.Context.AddString("no player / boon state"); return; }
+                if (args.Length < 2)
+                {
+                    args.Context.AddString("keystones: " + string.Join(", ",
+                        System.Enum.GetNames(typeof(KeystoneId)).Where(n => n != "None")));
+                    return;
+                }
+                if (!System.Enum.TryParse<KeystoneId>(args[1], true, out var id) || id == KeystoneId.None)
+                { args.Context.AddString($"unknown keystone '{args[1]}'"); return; }
+                if (BoonHud.State.HasKeystone(id)) { args.Context.AddString($"{id} already owned"); return; }
+                BoonHud.State.Boons.Add(new Boon { Keystone = id, Rarity = 3 });
+                BoonHud.State.Save(p); BoonStats.Apply(p, BoonHud.State);   // Apply publishes ownership to ZDO
+                args.Context.AddString($"granted keystone {id}");
             });
             new Terminal.ConsoleCommand("pilgrim_vfx_list", "list vfx prefab names [keyword]", args =>
             {
@@ -4411,15 +4461,18 @@ namespace EnvReporter
         static bool Prefix(ItemStand __instance, Humanoid user, bool hold, bool alt)
         {
             if (!Plugin.Cfg.Trophies.Enabled) return true;
-            // only intercept Shift+E (alt); regular E = vanilla (open/take)
-            if (hold || !alt) return true;
+            if (hold) return true;
+            // The `alt` param is unreliable under ZenItemStands — something re-issues Interact with alt=false
+            // even on Shift+E (probe: alt=False while ZInput "AltPlace"=True, shift physically held). Read the
+            // button vanilla uses for alt-interact directly, so we honor the player's keybind and aren't at the
+            // mercy of whatever upstream drops the flag. Plain E (AltPlace not held) → false → vanilla/Zen handles.
+            bool altInteract = alt || ZInput.GetButton("AltPlace");
+            if (!altInteract) return true;
             if (!__instance.HaveAttachment()) return true;
 
             // 1.0: GetAttachedItem returns the prefab-name stable hash (int); resolve to name.
             int attachHash = __instance.GetAttachedItem();
             string prefab = attachHash != 0 ? (ZNetScene.instance?.GetPrefab(attachHash)?.name ?? "") : "";
-            // Debug: always print what we see so we can fix the lookup key
-            Console.instance?.AddString($"[EnvR] ItemStand attached='{prefab}' hasAttach={__instance.HaveAttachment()}");
             if (string.IsNullOrEmpty(prefab)) return true;
             if (!Plugin.TrophyToPower.ContainsKey(prefab))
             {
@@ -4432,6 +4485,51 @@ namespace EnvReporter
 
             Plugin.GrantTrophyPower(player, prefab, vfxPos: player.transform.position);
             return false; // trophy stays on stand — shrine remains
+        }
+    }
+
+    // ZenItemStands' own ItemStand.Interact prefix opens the stand container whenever the `alt` param is false —
+    // which it is on our Shift+E claim (the param is mangled upstream). That sibling prefix runs even when ours
+    // returns false, so the container pops open alongside the claim. Suppress StandInventory.Open while the
+    // alt-interact button is held (the claim gesture). Registered only when ZenItemStands is present, so the
+    // forsaken feature still works — and this does nothing — without it.
+    [HarmonyPatch]
+    class ZenStandOpenSuppressPatch
+    {
+        static System.Type StandType() => AccessTools.TypeByName("ZenItemStands.StandInventory");
+        static bool Prepare() => StandType() != null;
+        static System.Reflection.MethodBase TargetMethod() => AccessTools.Method(StandType(), "Open");
+        static bool Prefix()
+        {
+            if (!Plugin.Cfg.Trophies.Enabled) return true;
+            // alt-interact held → the player is claiming a forsaken power; don't also open the stand container
+            return !ZInput.GetButton("AltPlace");
+        }
+    }
+
+    // ── Starred monsters always drop a trophy ────────────────────────────────
+    // 1★/2★ (Character level >= 2) guarantee their trophy. GenerateDropList runs on the target's owner
+    // (server for monsters) → server-authoritative. We find the creature's own trophy drop entry and
+    // ensure it's in the generated list.
+    [HarmonyPatch(typeof(CharacterDrop), nameof(CharacterDrop.GenerateDropList))]
+    static class StarredTrophyDropPatch
+    {
+        static void Postfix(CharacterDrop __instance, ref System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<GameObject, int>> __result)
+        {
+            if (!Plugin.Cfg.StarredTrophy.Enabled || __result == null) return;
+            var ch = __instance.GetComponent<Character>();
+            if (ch == null || ch.GetLevel() < 2) return;   // 2 = 1★, 3 = 2★; 1 = no star
+            foreach (var d in __instance.m_drops)
+            {
+                if (d?.m_prefab == null) continue;
+                var idrop = d.m_prefab.GetComponent<ItemDrop>();
+                if (idrop?.m_itemData?.m_shared == null
+                    || idrop.m_itemData.m_shared.m_itemType != ItemDrop.ItemData.ItemType.Trophy) continue;
+                bool present = false;
+                foreach (var kv in __result) if (kv.Key == d.m_prefab) { present = true; break; }
+                if (!present) __result.Add(new System.Collections.Generic.KeyValuePair<GameObject, int>(d.m_prefab, 1));
+                return;   // one trophy is enough
+            }
         }
     }
 
@@ -4527,7 +4625,7 @@ namespace EnvReporter
                     em.m_debugEnv = "";
                 if (em.m_debugEnv == "DreamWalk" && Plugin.HomeEnvExpiry <= 0f)
                     em.m_debugEnv = "";
-                if (em.m_debugEnv == "LastLight" && Plugin.SeekEnvExpiry <= 0f)
+                if ((em.m_debugEnv == "LastLight" || em.m_debugEnv == "Twilight_Clear") && Plugin.SeekEnvExpiry <= 0f)
                     em.m_debugEnv = "";
                 if (em.m_debugEnv == "VoidWhisper" && Plugin.DungeonEnvExpiry <= 0f)
                     em.m_debugEnv = "";
@@ -5621,6 +5719,16 @@ namespace EnvReporter
         // body), parent to the hull, and ignore-collide with the hull so it can't shove it over.
         static void SetupRiding(Ship ship, GameObject go, Spec spec)
         {
+            // 0.6.1: suppress smoke on the mounted pit — on a moving deck the smoke pools at the helm and
+            // suffocates whoever's steering. Idempotent per ride-tick; already-spawned smoke dissipates on its own.
+            foreach (var ss in go.GetComponentsInChildren<SmokeSpawner>())
+                if (ss != null && ss.enabled) ss.enabled = false;
+            // …but a disabled SmokeSpawner stops ticking while still activeInHierarchy, so Fireplace.IsBlocked()
+            // (Time.time - m_lastSpawnTime > 4s) goes true and the fire smothers itself. A deck fire has no roof
+            // to check anyway — turn off the cover check so the muted smoke can't extinguish it.
+            foreach (var fp in go.GetComponentsInChildren<Fireplace>())
+                if (fp != null) fp.m_disableCoverCheck = true;
+
             var wnt = go.GetComponent<WearNTear>();
             if (wnt != null) wnt.m_noSupportWear = false;
 
@@ -6512,17 +6620,20 @@ namespace EnvReporter
                 }
             }
 
-            // Altar seek env: LastLight
+            // Altar seek env: LastLight — OR its "Twilight_Clear" fallback (applied when LastLight isn't a
+            // registered env). 0.6.1: the old code only recognized "LastLight", so the fallback was never
+            // cleared AND the else-branch zeroed the timer on frame one → Twilight_Clear stuck forever.
             if (Plugin.SeekEnvExpiry > 0f)
             {
                 var em = EnvMan.instance;
+                bool ours = em != null && (em.m_debugEnv == "LastLight" || em.m_debugEnv == "Twilight_Clear");
                 if (Time.time >= Plugin.SeekEnvExpiry)
                 {
-                    if (em != null && em.m_debugEnv == "LastLight") em.m_debugEnv = "";
+                    if (ours) em.m_debugEnv = "";
                     Plugin.SeekEnvExpiry = 0f;
                 }
-                else if (em != null && em.m_debugEnv != "LastLight")
-                    Plugin.SeekEnvExpiry = 0f;
+                else if (em != null && !ours)
+                    Plugin.SeekEnvExpiry = 0f;   // player/another source changed the env → stop tracking
             }
 
             // Dungeon seek env: VoidWhisper
@@ -7640,9 +7751,62 @@ namespace EnvReporter
             if (__instance != Plugin._crateInventory) return true;
             // Internal cache rearrange — item already belongs to this inventory, skip filter
             if (__instance.ContainsItem(item)) return true;
-            if (CrateFilter.Allow(__instance, item, pos.x, pos.y)) return true;
-            __result = false;
-            return false;
+            if (!CrateFilter.Allow(__instance, item, pos.x, pos.y)) { __result = false; return false; }
+            // 0.6.1: one-stack-per-item — mirror the ctrl+click gate so drag-drop can't sneak a 2nd stack in
+            string prefab = ItemUtil.PrefabName(item);
+            var existing = __instance.GetAllItems().FirstOrDefault(i => i != item && ItemUtil.PrefabName(i) == prefab);
+            if (existing != null)
+            {
+                int room = existing.m_shared.m_maxStackSize - existing.m_stack;
+                if (room <= 0)
+                {
+                    Player.m_localPlayer?.Message(MessageHud.MessageType.Center, "The cache already holds one stack of that.");
+                    __result = false;
+                    return false;
+                }
+                int toMove = Mathf.Min(item.m_stack, room);
+                existing.m_stack += toMove;
+                item.m_stack     -= toMove;
+                __result = item.m_stack == 0;
+                __instance.m_onChanged?.Invoke();
+                return false;
+            }
+            return true;
+        }
+    }
+
+    // Real drag-drop path (1.0): InventoryGrid.DropItem → MoveItemToThis(5-arg) → private AddItem(item,amount,x,y).
+    // The Vector2i/ctrl+click overloads above never reach this private method, so the one-stack gate must live
+    // here too — otherwise dragging a 2nd stack onto an empty slot creates a second stack (the 0.6.1 bug).
+    [HarmonyPatch(typeof(Inventory), "AddItem",
+        new System.Type[] { typeof(ItemDrop.ItemData), typeof(int), typeof(int), typeof(int), typeof(bool) })]
+    static class CrateAddItemSlotPatch
+    {
+        static bool Prefix(Inventory __instance, ItemDrop.ItemData item, int amount, int x, int y,
+                           ref bool __result)
+        {
+            if (__instance != Plugin._crateInventory) return true;
+            if (__instance.ContainsItem(item)) return true;   // internal cache rearrange
+            if (!CrateFilter.Allow(__instance, item, x, y)) { __result = false; return false; }
+            string prefab = ItemUtil.PrefabName(item);
+            var existing = __instance.GetAllItems().FirstOrDefault(i => i != item && ItemUtil.PrefabName(i) == prefab);
+            if (existing != null)
+            {
+                int room = existing.m_shared.m_maxStackSize - existing.m_stack;
+                if (room <= 0)
+                {
+                    Player.m_localPlayer?.Message(MessageHud.MessageType.Center, "The cache already holds one stack of that.");
+                    __result = false;
+                    return false;
+                }
+                int toMove = Mathf.Min(amount, room);
+                existing.m_stack += toMove;
+                item.m_stack     -= toMove;
+                __result = toMove == amount;   // matches vanilla private-AddItem flag; MoveItemToThis drops source when m_stack==0
+                __instance.m_onChanged?.Invoke();
+                return false;
+            }
+            return true;
         }
     }
 
@@ -7764,6 +7928,7 @@ namespace EnvReporter
         public float  XpCurveGrowth     { get; set; } = 1.05f;
         public int    DrawCount         { get; set; } = 3;
         public int    Rerolls           { get; set; } = 1;
+        public int    RerollCap         { get; set; } = 2;   // max boon rerolls bankable from surviving raids
         public string LevelUpVfx        { get; set; } = "fx_frozenking_aspectspawn density=6 scale=0.55 lifetime=0.7; sfx_dverger_heal_start delay=0.5; sfx_dverger_heal_finish delay=1.9";
         public float  LevelUpVfxDensity { get; set; } = 1.5f;
         public string PickSfx           { get; set; } = "sfx_frozenking_charge_whoosh";   // extra sound when a boon is picked
@@ -7781,14 +7946,14 @@ namespace EnvReporter
         public string SheetSidecarSprite { get; set; } = "woodpanel_password";   // legendaries sidecar sprite (blank = same as sheet)
         public float  SheetPanelZoom    { get; set; } = 1f;
         // --- legendaries (Unique tier) ---
-        public float  LegendaryChance   { get; set; } = 0.20f;   // per card slot: chance to roll a keystone instead of a give/take boon
+        public float  LegendaryChance   { get; set; } = 0.01f;   // 0.6.1: 20%->1% (uniques far too common per playtest); per card slot chance to roll a keystone
         public float  AttrW1            { get; set; } = 40f;     // numeric boon: relative weight to roll 1 attribute
         public float  AttrW2            { get; set; } = 30f;     // ...2 attributes
         public float  AttrW3            { get; set; } = 20f;     // ...3 attributes
         public float  AttrW4            { get; set; } = 10f;     // ...4 attributes
         // axis roll-weight buckets (relative; baseline = 1). Generals are rare because any general forces Rare rarity.
         public float  WeightGeneral     { get; set; } = 0.3f;    // Damage, Defense, StaminaUse, Survival
-        public float  WeightResist      { get; set; } = 0.5f;    // the 8 per-type resistances
+        public float  WeightResist      { get; set; } = 0.2f;    // the 8 per-type resistances (0.6.1: 0.5->0.2, were overpowered + too frequent)
         public float  WeightDmgType     { get; set; } = 0.7f;    // the 8 per-type outgoing-damage leaves
         public float  WeightStamLeaf    { get; set; } = 0.7f;    // the 8 stamina-use leaves
         public float  WeightBase        { get; set; } = 1.0f;    // everything else
@@ -7807,12 +7972,14 @@ namespace EnvReporter
         public bool   TemerityEnabled   { get; set; } = true;    // "You deal 2x blunt damage."
         public bool   ContemptEnabled   { get; set; } = true;    // "You deal 2x pierce damage."
         public bool   PyrrhicEnabled    { get; set; } = true;    // "Grants favorable boon rolls."
+        public bool   EuthanasiaEnabled { get; set; } = true;    // "Your blows slay foes below 20% health."
         public float  PyrrhicBaseFactor { get; set; } = 0.3f;    // Pyrrhic multiplies the baseline axis weight by this (lower = stronger rolls)
     }
 
     public class PilgrimConfig
     {
         public TrophiesConfig   Trophies  { get; set; } = new TrophiesConfig();
+        public StarredTrophyConfig StarredTrophy { get; set; } = new StarredTrophyConfig();
         public BedsConfig       Beds      { get; set; } = new BedsConfig();
         public CacheConfig      Cache     { get; set; } = new CacheConfig();
         public CartsConfig      Carts     { get; set; } = new CartsConfig();
@@ -7898,6 +8065,12 @@ namespace EnvReporter
     {
         public bool   Enabled { get; set; } = true;
         public string Vfx     { get; set; } = "fx_fireskeleton_nova";
+    }
+
+    // Starred monsters (1★ or 2★) always drop their trophy.
+    public class StarredTrophyConfig
+    {
+        public bool Enabled { get; set; } = true;
     }
 
     public class CacheConfig
