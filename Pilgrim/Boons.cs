@@ -59,6 +59,8 @@ namespace EnvReporter
         internal static float AttrW2 => C.AttrW2;
         internal static float AttrW3 => C.AttrW3;
         internal static float AttrW4 => C.AttrW4;
+        internal static float RepeatAxisChance => C.RepeatAxisChance;
+        internal static bool  BiasedMagnitude  => C.BiasedMagnitude;
         internal static float WeightGeneral  => C.WeightGeneral;
         internal static float WeightResist   => C.WeightResist;
         internal static float WeightDmgType  => C.WeightDmgType;
@@ -219,6 +221,90 @@ namespace EnvReporter
             [BoonAxis.BlockForce]  = new AxisDef { GiveAdj="Immovable", GiveNoun="the Rampart",TakeAdj="Yielding",    TakeNoun="the Give",   Noun="block force",     Percent=true },
         };
 
+        // Rare+ boons name their suffix as a gerund ("...Boon of Wounding") instead of a noun ("...of the Wound").
+        // (Give, Take) per axis — the give form for an upside suffix, the take form for a downside. Kept as a
+        // separate table rather than two more fields on every AxisDef. Lookups fall back to the noun if missing.
+        internal static readonly Dictionary<BoonAxis, (string Give, string Take)> Gerund = new()
+        {
+            [BoonAxis.Damage]       = ("Sharpening", "Dulling"),
+            [BoonAxis.AtkStamina]   = ("Flurrying",  "Exerting"),
+            [BoonAxis.MoveSpeed]    = ("Hastening",  "Slowing"),
+            [BoonAxis.HpRegen]      = ("Mending",    "Wounding"),
+            [BoonAxis.StamRegen]    = ("Enduring",   "Wearying"),
+            [BoonAxis.FlatArmor]    = ("Warding",    "Cracking"),
+            [BoonAxis.RunStamina]   = ("Bounding",   "Burdening"),
+            [BoonAxis.JumpStamina]  = ("Springing",  "Anchoring"),
+            [BoonAxis.BlockStamina] = ("Guarding",   "Straining"),
+            [BoonAxis.DodgeStamina] = ("Evading",    "Stumbling"),
+            [BoonAxis.SwimStamina]  = ("Treading",   "Sinking"),
+            [BoonAxis.SneakStamina] = ("Stilling",   "Fidgeting"),
+            [BoonAxis.Stagger]      = ("Steadying",  "Faltering"),
+            [BoonAxis.FallDamage]   = ("Floating",   "Plummeting"),
+            [BoonAxis.ArmorPct]     = ("Shielding",  "Exposing"),
+            [BoonAxis.Parry]        = ("Deflecting", "Opening"),
+            [BoonAxis.EitrRegen]    = ("Channeling", "Dimming"),
+            [BoonAxis.SwimSpeed]    = ("Gliding",    "Dragging"),
+            [BoonAxis.Stealth]      = ("Veiling",    "Glaring"),
+            [BoonAxis.CarryWeight]  = ("Hauling",    "Overloading"),
+            [BoonAxis.BuildStamina] = ("Crafting",   "Toiling"),
+            [BoonAxis.StaminaUse]   = ("Flowing",    "Laboring"),
+            [BoonAxis.Defense]      = ("Fortifying", "Breaching"),
+            [BoonAxis.ResBlunt]     = ("Cushioning", "Bruising"),
+            [BoonAxis.ResSlash]     = ("Toughening", "Gashing"),
+            [BoonAxis.ResPierce]    = ("Plating",    "Puncturing"),
+            [BoonAxis.ResFire]      = ("Tempering",  "Scorching"),
+            [BoonAxis.ResFrost]     = ("Warming",    "Chilling"),
+            [BoonAxis.ResPoison]    = ("Purifying",  "Envenoming"),
+            [BoonAxis.ResLightning] = ("Grounding",  "Storming"),
+            [BoonAxis.ResSpirit]    = ("Hallowing",  "Haunting"),
+            [BoonAxis.DmgBlunt]     = ("Mauling",    "Softening"),
+            [BoonAxis.DmgSlash]     = ("Cutting",    "Nicking"),
+            [BoonAxis.DmgPierce]    = ("Piercing",   "Bending"),
+            [BoonAxis.DmgFire]      = ("Burning",    "Smoldering"),
+            [BoonAxis.DmgFrost]     = ("Freezing",   "Thawing"),
+            [BoonAxis.DmgPoison]    = ("Blighting",  "Diluting"),
+            [BoonAxis.DmgLightning] = ("Shocking",   "Flickering"),
+            [BoonAxis.DmgSpirit]    = ("Smiting",    "Profaning"),
+            [BoonAxis.SkillXp]      = ("Learning",   "Forgetting"),
+            [BoonAxis.AttackSpeed]  = ("Quickening", "Lagging"),
+            [BoonAxis.StaggerDealt] = ("Jolting",    "Lulling"),
+            [BoonAxis.BackstabDealt]= ("Ambushing",  "Dueling"),
+            [BoonAxis.CrouchSpeed]  = ("Prowling",   "Crawling"),
+            [BoonAxis.JumpHeight]   = ("Leaping",    "Weighing"),
+            [BoonAxis.Survival]     = ("Nourishing", "Starving"),
+            [BoonAxis.WoodCutting]  = ("Hewing",     "Splintering"),
+            [BoonAxis.Pickaxes]     = ("Delving",    "Crumbling"),
+            [BoonAxis.FoodDuration] = ("Feasting",   "Famishing"),
+            [BoonAxis.RestedDuration]=("Reposing",   "Waking"),
+            [BoonAxis.BlockForce]   = ("Bracing",    "Yielding"),
+        };
+
+        // Axis → patron: a Rare+ boon is attributed to a patron named for the DOMAIN of its dominant gift, so the
+        // same kind of boon always carries the same name ("Bjorn's" = offense, "Hallveig's" = defense, …).
+        // Each domain has a small patron pool; a boon's dominant-gift axis deterministically picks one
+        // (so the SAME boon always carries the SAME name, but different axes in a domain vary the patron).
+        static readonly string[] PatronOffense  = { "Bjorn",    "Ragnar",  "Sigurd"   };
+        static readonly string[] PatronDefense  = { "Hallveig", "Torvald", "Gunnhild" };
+        static readonly string[] PatronStamina  = { "Gunnar",   "Ivar",    "Sten"     };
+        static readonly string[] PatronRegen    = { "Astrid",   "Yrsa",    "Eira"     };
+        static readonly string[] PatronMobility = { "Leif",     "Hjalti",  "Runa"     };
+        static readonly string[] PatronUtility  = { "Sigrun",   "Ulfar",   "Thora"    };
+
+        internal static string Patron(BoonAxis a)
+        {
+            string[] pool;
+            if (a == BoonAxis.Damage || DamageLeafSet.Contains(a) || a == BoonAxis.AttackSpeed
+                || a == BoonAxis.StaggerDealt || a == BoonAxis.BackstabDealt)            pool = PatronOffense;
+            else if (a == BoonAxis.Defense || DefenseParts.Contains(a) || a == BoonAxis.FlatArmor
+                || Def[a].Categorical)                                                  pool = PatronDefense;
+            else if (a == BoonAxis.StaminaUse || StaminaLeaves.Contains(a))             pool = PatronStamina;
+            else if (a == BoonAxis.HpRegen || a == BoonAxis.StamRegen || a == BoonAxis.EitrRegen) pool = PatronRegen;
+            else if (a == BoonAxis.MoveSpeed || a == BoonAxis.SwimSpeed
+                || a == BoonAxis.CrouchSpeed || a == BoonAxis.JumpHeight)               pool = PatronMobility;
+            else                                                                        pool = PatronUtility;
+            return pool[((int)a) % pool.Length];
+        }
+
         // the 8 per-type outgoing-damage axes → the DamageTypes field they feed
         internal static readonly BoonAxis[] DamageAxes =
         {
@@ -264,6 +350,7 @@ namespace EnvReporter
         // axes that can actually be ROLLED. ResSpirit is excluded: no vanilla enemy deals spirit damage to a
         // player, so a spirit *resistance* is always a dud. Its AxisDef stays (DmgSpirit is useful, and any
         // already-owned ResSpirit boon still renders/applies) — it just won't come up in new draws.
+        // (DmgPoison/DmgLightning are kept: poison arrows + Draugr Fang deal poison; lightning exists rarely.)
         internal static readonly BoonAxis[] Rollable = All.Where(a => a != BoonAxis.ResSpirit).ToArray();
 
         // the 8 per-type resistance axes
@@ -312,16 +399,30 @@ namespace EnvReporter
             get
             {
                 if (IsKeystone) return Keystones.Def[Keystone].Name;
-                AxisRoll give = default, take = default; bool hasG = false, hasT = false;
+                // track the two biggest gifts (give, give2) and the biggest cost (take)
+                AxisRoll give = default, give2 = default, take = default;
+                bool hasG = false, hasG2 = false, hasT = false;
                 foreach (var r in Rolls)
                 {
-                    if (r.Net > 0 && (!hasG || r.Net > give.Net)) { give = r; hasG = true; }
-                    if (r.Net < 0 && (!hasT || r.Net < take.Net)) { take = r; hasT = true; }
+                    if (r.Net > 0)
+                    {
+                        if (!hasG || r.Net > give.Net) { give2 = give; hasG2 = hasG; give = r; hasG = true; }
+                        else if (!hasG2 || r.Net > give2.Net) { give2 = r; hasG2 = true; }
+                    }
+                    else if (r.Net < 0 && (!hasT || r.Net < take.Net)) { take = r; hasT = true; }
                 }
-                string adj = hasG ? Axes.Def[give.Axis].GiveAdj : "Hollow";
-                string suf = hasT ? Axes.Def[take.Axis].TakeNoun
-                           : hasG ? Axes.Def[give.Axis].GiveNoun : "Nothing";
-                return $"{adj} Boon of {suf}";
+                if (!hasG && !hasT) return "Hollow Boon of Nothing";   // shouldn't happen (RollNumeric floors a gift)
+                string patron = Rarity >= 2 ? Axes.Patron(give.Axis) + "'s " : "";   // Rare+ only; keystones handled above
+                // suffix is ALWAYS a gerund ("of Wounding", not "of the Wound"), with a noun fallback
+                string Ger(BoonAxis ax, bool asTake) =>
+                    Axes.Gerund.TryGetValue(ax, out var g) ? (asTake ? g.Take : g.Give)
+                    : (asTake ? Axes.Def[ax].TakeNoun : Axes.Def[ax].GiveNoun);
+                // gift + cost → gift's adjective, cost's gerund: "Bjorn's Keen Boon of Wounding"
+                if (hasT) return $"{patron}{Axes.Def[give.Axis].GiveAdj} Boon of {Ger(take.Axis, true)}";
+                // two gifts, no cost → second gift's adjective + biggest gift's gerund: "Galvanic Boon of Freezing"
+                if (hasG2) return $"{patron}{Axes.Def[give2.Axis].GiveAdj} Boon of {Ger(give.Axis, false)}";
+                // single pure gift → drop the adjective (no repetition): "Boon of Prowling"
+                return $"{patron}Boon of {Ger(give.Axis, false)}";
             }
         }
 
@@ -400,16 +501,31 @@ namespace EnvReporter
             return Axes.Rollable[Axes.Rollable.Length - 1];
         }
 
+        // magnitude of a single roll. With BiasedMagnitude, take the better of two 0–10 rolls — for a gift that's
+        // a bigger gift, for a take a bigger (worse) penalty. Either way the roll is more likely to matter; the
+        // sign is applied by the caller, so "best of 2 on gifts / worst of 2 on takes" is one max() here.
+        static int RollMag() => BoonCfg.BiasedMagnitude ? Math.Max(Roll010(), Roll010()) : Roll010();
+
         static Boon RollNumeric()
         {
             int count = RollCount();
             var net = new Dictionary<BoonAxis, int>();
+            var used = new List<BoonAxis>();       // axes rolled so far this boon (for the repeat-axis bias)
             for (int i = 0; i < count; i++)
             {
-                bool give = i == 0 || Rng.NextDouble() < 0.5;
-                var axis = PickAxis();
-                int val = Roll010();
+                // axis pick: a later attribute may deliberately re-target an axis already used this boon, so
+                // stacking becomes incidentally common (RepeatAxisChance). Otherwise a fresh weighted pick.
+                BoonAxis axis;
+                if (i > 0 && used.Count > 0 && Rng.NextDouble() < BoonCfg.RepeatAxisChance)
+                    axis = used[Rng.Next(used.Count)];
+                else { axis = PickAxis(); if (!used.Contains(axis)) used.Add(axis); }
+
+                // same-sign constraint (distinct from the repeat chance): if this axis already carries a sign this
+                // boon — whether from the repeat mechanism OR a coincidental PickAxis collision — the new roll
+                // inherits it, so same-axis rolls always amplify and never cancel. Fresh axis: attr 0 gives, else 50/50.
                 net.TryGetValue(axis, out int cur);
+                bool give = cur > 0 ? true : cur < 0 ? false : (i == 0 || Rng.NextDouble() < 0.5);
+                int val = RollMag();
                 net[axis] = cur + (give ? val : -val);
             }
             var b = new Boon();
@@ -524,9 +640,13 @@ namespace EnvReporter
         public bool HasKeystone(KeystoneId id) => Boons.Any(b => b.Keystone == id);
 
         // aggregate give(+)/take(-) points per axis (keystones have no axis → skipped)
+        // reuses a per-state buffer — Apply() calls this every 0.5s and consumes the result immediately,
+        // so there's no need to allocate a fresh dictionary each tick (was churning gen-0 garbage per player).
+        readonly Dictionary<BoonAxis, int> _totalsBuf = new();
         public Dictionary<BoonAxis, int> Totals()
         {
-            var t = Axes.All.ToDictionary(a => a, _ => 0);
+            var t = _totalsBuf;
+            foreach (var a in Axes.All) t[a] = 0;
             foreach (var b in Boons)
             {
                 if (b.IsKeystone) continue;

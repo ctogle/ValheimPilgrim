@@ -97,6 +97,55 @@ namespace EnvReporter
             }
         }
 
+        // ── Server-authoritative config projection ───────────────────────────────
+        // The server pushes its FULL in-memory config to every client, which applies it in memory ONLY —
+        // the client's own Pilgrim.yaml on disk is never touched. Clients therefore run the server's exact
+        // ritual/boon/cache parameters. Re-broadcast on a server-side hot-reload. (Mirrors PT's PTCfgSync.)
+        internal static bool _serverCfgApplied = false;   // a client has taken the server's config this session
+
+        static string SerializeCfg() =>
+            new SerializerBuilder().WithNamingConvention(UnderscoredNamingConvention.Instance).Build().Serialize(Cfg);
+
+        internal static void SendPilgrimCfgToPeer(long peerID)
+        {
+            if (ZNet.instance == null || !ZNet.instance.IsServer()) return;
+            var pkg = new ZPackage();
+            pkg.Write(SerializeCfg());
+            ZRoutedRpc.instance.InvokeRoutedRPC(peerID, "Pilgrim_CfgSync", pkg);
+            Log.LogInfo($"[Pilgrim] Sent authoritative config to peer {peerID}.");
+        }
+
+        internal static void BroadcastPilgrimCfg()
+        {
+            var znet = ZNet.instance;
+            if (znet == null || !znet.IsServer()) return;
+            var peers = znet.GetConnectedPeers();
+            if (peers == null) return;
+            int n = 0;
+            foreach (var p in peers) { if (p == null || p.m_uid == 0) continue; SendPilgrimCfgToPeer(p.m_uid); n++; }
+            if (n > 0) Log.LogInfo($"[Pilgrim] Broadcast config to {n} peer(s).");
+        }
+
+        // Client receipt: apply the server config in memory; never write the local file.
+        internal static void RPC_ReceivePilgrimCfg(ZPackage pkg)
+        {
+            if (ZNet.instance != null && ZNet.instance.IsServer()) return;   // server is the source, never overrides itself
+            if (pkg == null) return;
+            try
+            {
+                string yaml = pkg.ReadString();
+                var incoming = new DeserializerBuilder()
+                    .WithNamingConvention(UnderscoredNamingConvention.Instance)
+                    .IgnoreUnmatchedProperties().Build()
+                    .Deserialize<PilgrimConfig>(yaml);
+                if (incoming == null) return;
+                Cfg = incoming;                 // in-memory only — the client's Pilgrim.yaml is left as-is
+                _serverCfgApplied = true;
+                Log.LogInfo("[Pilgrim] Applied server-authoritative config (in memory; local file untouched).");
+            }
+            catch (System.Exception ex) { Log.LogWarning($"[Pilgrim] Failed to apply server config: {ex.Message}"); }
+        }
+
         // True if the on-disk YAML is missing any mapping key present in the full serialized config.
         // Compares key presence only (not values), recursing into nested maps — so user-edited values
         // are never flagged, but newly-added fields are. Dict/sequence contents aren't recursed.
@@ -630,6 +679,7 @@ namespace EnvReporter
             ("Resin",         false, "kindle",         "Resin"),
             ("Coal",          false, "repair",         "Coal"),
             ("YmirRemains",   false, "giant",          "Ymir Flesh"),
+            ("Fish",          true,  "bountiful",      "Fish"),
             ("RawMeat",       false, "burden",         "Boar Meat"),
             ("Amber",         false, "ward_bubble",    "Amber"),
             ("AmberPearl",    false, "campfire_ward",  "Amber Pearl"),
@@ -756,6 +806,8 @@ namespace EnvReporter
         internal static float ClearSkiesDuration => Cfg.Rituals.Items.GetValueOrDefault("clear_skies")?.Duration  ?? 900f;
         internal static float RainDuration        => Cfg.Rituals.Items.GetValueOrDefault("restore_power")?.Duration ?? 600f;
         internal static float WaterWalkDuration   => Cfg.Rituals.Items.GetValueOrDefault("water_walk")?.Duration   ?? 60f;
+        internal static float BountifulDuration    => Cfg.Rituals.Items.GetValueOrDefault("bountiful")?.Duration   ?? 60f;
+        internal static string BountifulFood       => Cfg.Rituals.Items.GetValueOrDefault("bountiful")?.Item       ?? "FishRaw";
         internal static float SeekEnvDuration     => 60f; // matches SE TTL, not user-facing
         internal static float DungeonEnvDuration  => 60f;
         internal static float HomeEnvDuration     => 60f;
@@ -789,6 +841,7 @@ namespace EnvReporter
         internal static string? _legendaryActivePrefab = null;
         static ItemDrop.ItemData? _legendaryOrigItem   = null;
         internal static float GiantExpiry          = 0f;
+        internal static float BountifulExpiry      = 0f;   // 2× harvest drops while active
         internal static float BurdenExpiry         = 0f;
         internal static float ShieldBubbleExpiry   = 0f;
         internal static float CampfireWardExpiry   = 0f;
@@ -921,7 +974,20 @@ namespace EnvReporter
 
         void Update()
         {
-            if (_cfgDirty) { _cfgDirty = false; LoadConfig(); }
+            if (_cfgDirty)
+            {
+                _cfgDirty = false;
+                bool isClient = ZNet.instance != null && !ZNet.instance.IsServer();
+                if (isClient && _serverCfgApplied)
+                {
+                    // connected to a server → config is server-authoritative; ignore local file edits
+                }
+                else
+                {
+                    LoadConfig();
+                    if (ZNet.instance != null && ZNet.instance.IsServer()) BroadcastPilgrimCfg();  // re-project on server edit
+                }
+            }
         }
 
         void RegisterCommands()
@@ -2284,6 +2350,31 @@ namespace EnvReporter
         }
 
         // ── Giant ritual ────────────────────────────────────────────────────
+
+        // Bountiful: a purely client-side blessing on the local player — doubles Pickable yields (berries,
+        // mushrooms, crops) and cauldron crafting output while active. Both resolve on the local player's
+        // client, so a local Time.time expiry is all we need (no ZDO/server sync). Creatures/trees/ore are
+        // intentionally out of scope.
+        internal static SE_Bountiful BountifulSE;
+
+        internal static void ActivateBountiful(Player player, string message, float mult = 1f)
+        {
+            float duration = BountifulDuration * mult;
+            BountifulExpiry = Time.time + duration;
+            // visible status indicator (fish icon + "Bountiful" + countdown)
+            if (BountifulSE == null)
+            {
+                BountifulSE = ScriptableObject.CreateInstance<SE_Bountiful>();
+                BountifulSE.name   = "SE_Bountiful";
+                BountifulSE.m_name  = "Bountiful";
+                BountifulSE.m_tooltip = "The gods bless your bounty.";
+            }
+            BountifulSE.m_ttl = duration;
+            player.GetSEMan().AddStatusEffect(BountifulSE, resetTime: true);
+            player.Message(MessageHud.MessageType.Center, message);
+        }
+
+        internal static bool BountifulActive => BountifulExpiry > 0f && Time.time < BountifulExpiry;
 
         internal static void ActivateGiant(Player player, string message = "The mountain answers. You are vast.", float mult = 1f)
         {
@@ -4039,6 +4130,7 @@ namespace EnvReporter
                          || (prefab == Plugin.TameFood       && RitualEnabled("tame_flock"))
                          || (prefab == Plugin.MeadFood       && RitualEnabled("mead_ripen"))
                          || (prefab == Plugin.GiantFood       && RitualEnabled("giant"))
+                         || (prefab.StartsWith("Fish")        && RitualEnabled("bountiful"))
                          || (prefab == Plugin.BurdenFood      && RitualEnabled("burden"))
                          || (prefab == Plugin.WardFood         && RitualEnabled("ward_bubble"))
                          || (prefab == Plugin.CampfireWardFood && RitualEnabled("campfire_ward"))
@@ -4142,6 +4234,10 @@ namespace EnvReporter
             {
                 if (RitualEnabled("giant"))
                 { Consume("giant"); Plugin.ActivateGiant(__instance, RitualMsg("giant", "The mountain answers. You are vast."), ritualMult); return false; }
+            }
+            if (prefab.StartsWith("Fish") && RitualEnabled("bountiful"))
+            {
+                Consume("bountiful"); Plugin.ActivateBountiful(__instance, RitualMsg("bountiful", "The gods bless your bounty."), ritualMult); return false;
             }
             if (prefab == Plugin.BurdenFood)
             {
@@ -4533,6 +4629,70 @@ namespace EnvReporter
         }
     }
 
+    // ── Bountiful: double cauldron crafting output while the blessing is active ──────────────────
+    // Crafting at the cauldron resolves on the local player's client. We record the crafted item's count
+    // before the craft, then after a successful cauldron craft add one more batch of whatever was actually
+    // produced (including any crafting-skill bonus). Client-side only — MP-correct for SP, host, and dedi.
+    [HarmonyPatch(typeof(InventoryGui), "DoCrafting")]
+    static class BountifulCauldronPatch
+    {
+        static string _prefab; static int _quality, _variant, _before = -1;
+
+        static void Prefix(InventoryGui __instance, Player player)
+        {
+            _before = -1;
+            if (!Plugin.BountifulActive || player == null || player != Player.m_localPlayer) return;
+            var st = player.GetCurrentCraftingStation();
+            if (st == null || !st.gameObject.name.ToLower().Contains("cauldron")) return;
+            var recipe  = HarmonyLib.Traverse.Create(__instance).Field("m_craftRecipe").GetValue<Recipe>();
+            var upgrade = HarmonyLib.Traverse.Create(__instance).Field("m_craftUpgradeItem").GetValue<ItemDrop.ItemData>();
+            if (recipe == null || recipe.m_item == null || upgrade != null) return;   // new crafts only, not upgrades
+            _prefab  = recipe.m_item.gameObject.name;
+            _quality = 1;
+            _variant = HarmonyLib.Traverse.Create(__instance).Field("m_craftVariant").GetValue<int>();
+            _before  = CountOwn(player, _prefab);
+        }
+
+        static void Postfix(Player player)
+        {
+            if (_before < 0 || player == null) return;
+            string prefab = _prefab; int quality = _quality, variant = _variant, before = _before;
+            _before = -1;
+            int crafted = CountOwn(player, prefab) - before;
+            if (crafted <= 0) return;                                                 // craft didn't actually happen
+            player.GetInventory().AddItem(prefab, crafted, quality, variant, 0L, "", false);   // one more batch → 2×
+        }
+
+        // count items in the player's own inventory by drop-prefab (bypasses the cache-inclusive CountItems patch)
+        static int CountOwn(Player p, string prefab) =>
+            p.GetInventory().GetAllItems().Where(i => i.m_dropPrefab != null && i.m_dropPrefab.name == prefab).Sum(i => i.m_stack);
+    }
+
+    // ── Bountiful harvest: double Pickable yields (bushes, berries, mushrooms, crops, ground pickups) ─
+    // Pickables resolve on the picker's own client, so this keys off the local Plugin.BountifulActive flag —
+    // no ZDO/server round-trip, and it works the instant the ritual is cast (unlike the creature-drop path,
+    // which runs on the monster's server-side owner). Mirrors the Avarice keystone's extra-drop pattern:
+    // vanilla gives the native yield, we drop one more native yield on the ground → 2× total.
+    [HarmonyPatch(typeof(Pickable), "Interact")]
+    static class BountifulPickablePatch
+    {
+        // Double the base yield at the source while bountiful is active, so the game's own resource-rate
+        // multiplier scales the DOUBLED base (e.g. 3× server → 6) and the yield lands in the inventory the
+        // normal way — no extra ground pickup. __state carries the original amount to restore afterward.
+        static void Prefix(Pickable __instance, Humanoid character, out int __state)
+        {
+            __state = -1;
+            if (__instance == null || character == null || character != Player.m_localPlayer || !Plugin.BountifulActive) return;
+            if (HarmonyLib.Traverse.Create(__instance).Field("m_picked").GetValue<bool>()) return;  // already picked
+            __state = __instance.m_amount;
+            __instance.m_amount = Mathf.Max(1, __instance.m_amount) * 2;
+        }
+        static void Postfix(Pickable __instance, int __state)
+        {
+            if (__state >= 0 && __instance != null) __instance.m_amount = __state;   // restore base yield
+        }
+    }
+
     // ── Bed: sleep without changing spawn (Shift+E) ─────────────────────────
 
     [HarmonyPatch(typeof(Bed), "GetHoverText")]
@@ -4581,6 +4741,31 @@ namespace EnvReporter
     static class PlayerSetSpawnPointPatch
     {
         static bool Prefix() => !Plugin._suppressSpawnSet;
+    }
+
+    // ── SE_Bountiful ─────────────────────────────────────────────────────────
+    // Purely a visual indicator for the bountiful-harvest ritual (fish icon + countdown). The actual
+    // doubling lives in the Pickable/CharacterDrop patches keyed off Plugin.BountifulActive / the ZDO.
+    public class SE_Bountiful : StatusEffect
+    {
+        public override void Setup(Character character)
+        {
+            base.Setup(character);
+            if (m_icon == null)
+                foreach (var cand in new[] { "FishCooked", "FishRaw", "Fish1" })
+                {
+                    var sprite = ObjectDB.instance?.GetItemPrefab(cand)?.GetComponent<ItemDrop>()?
+                                 .m_itemData?.m_shared?.m_icons?.FirstOrDefault();
+                    if (sprite != null) { m_icon = sprite; break; }
+                }
+        }
+
+        public override string GetIconText()
+        {
+            float remaining = Mathf.Max(0f, m_ttl - m_time);
+            int mins = (int)(remaining / 60), secs = (int)(remaining % 60);
+            return mins > 0 ? $"{mins}m {secs:D2}s" : $"{secs}s";
+        }
     }
 
     // ── SE_GuidingWind ───────────────────────────────────────────────────────
@@ -5965,6 +6150,35 @@ namespace EnvReporter
         }
     }
 
+    // On disconnect/return-to-menu, a client drops the server's config and reloads its own local file,
+    // so a later single-player session uses local settings again.
+    [HarmonyPatch(typeof(ZNet), nameof(ZNet.Shutdown))]
+    static class PilgrimCfgResetOnShutdownPatch
+    {
+        static void Prefix()
+        {
+            bool wasClient = ZNet.instance != null && !ZNet.instance.IsServer();
+            if (wasClient && Plugin._serverCfgApplied)
+            {
+                Plugin._serverCfgApplied = false;
+                Plugin.LoadConfig();   // restore local config from disk
+            }
+        }
+    }
+
+    // Server pushes its authoritative config to each client as it connects.
+    [HarmonyPatch]
+    static class PilgrimOnNewPeerPatch
+    {
+        static System.Reflection.MethodBase TargetMethod() =>
+            typeof(ZoneSystem).GetMethod("OnNewPeer", BindingFlags.NonPublic | BindingFlags.Instance);
+        static void Postfix(long peerID)
+        {
+            if (ZNet.instance == null || !ZNet.instance.IsServer()) return;
+            Plugin.SendPilgrimCfgToPeer(peerID);
+        }
+    }
+
     [HarmonyPatch(typeof(ZNet), "Start")]
     static class GameStartRpcPatch
     {
@@ -5989,6 +6203,9 @@ namespace EnvReporter
 
             ZRoutedRpc.instance.Register<float, float>("Pilgrim_SetWind", (_, angle, intensity) =>
                 Plugin.ApplyWind(angle, intensity));
+
+            // Server-authoritative config: clients apply whatever the server sends (handler no-ops on the server)
+            ZRoutedRpc.instance.Register<ZPackage>("Pilgrim_CfgSync", (_, pkg) => Plugin.RPC_ReceivePilgrimCfg(pkg));
 
             // Server-side: look up altar position and reply to requesting peer
             ZRoutedRpc.instance.Register<string, Vector3>("Pilgrim_SeekAltarRequest", (senderPeer, prefabName, refPos) =>
@@ -6067,6 +6284,41 @@ namespace EnvReporter
                 float duration = pkg.ReadSingle();
                 Plugin.ApplySeekTargetLocal(seekType, target, duration);
             });
+        }
+    }
+
+    // ── Picked items top up an existing cache stack (no manual drag) ─────────────
+    // Fires right after a pickup lands in the player inventory (ShowPickupMessage, local player). If the cache
+    // already holds a partial stack of the same item, move up to that stack's remaining room out of the
+    // inventory and into the cache — so the cache stack fills before a new inventory stack starts. If the cache
+    // has NO stack of the item, we leave it in the inventory (first-pickup / discovery behavior is preserved).
+    // We only mutate the existing cache stack's count + the player inventory (local ops the mod already does),
+    // never the world ItemDrop — so no networking/dupe risk.
+    [HarmonyPatch(typeof(Character), nameof(Character.ShowPickupMessage))]
+    class CacheStackFillPatch
+    {
+        static void Postfix(Character __instance, ItemDrop.ItemData item)
+        {
+            if (!Plugin.Cfg.Cache.Enabled || !Plugin.Cfg.Cache.FillStacksOnPickup) return;
+            var player = __instance as Player;
+            if (player == null || player != Player.m_localPlayer || item?.m_shared == null) return;
+            int maxStack = item.m_shared.m_maxStackSize;
+            if (maxStack <= 1) return;                              // non-stackable → nothing to top up
+            var crateInv = Plugin.GetCrateInvForRead(player);
+            if (crateInv == null) return;
+            string name = item.m_shared.m_name;
+            var cacheStack = crateInv.GetItem(name);
+            if (cacheStack == null) return;                        // no existing cache stack → leave in inventory
+            int room = maxStack - cacheStack.m_stack;
+            if (room <= 0) return;                                 // cache stack already full
+            var inv = player.GetInventory();
+            // count directly from the item list — bypasses our CountItems patch which folds in cache items
+            int have = inv.GetAllItems().Where(i => i.m_shared.m_name == name).Sum(i => i.m_stack);
+            int move = System.Math.Min(room, System.Math.Min(have, Mathf.Max(1, item.m_stack)));
+            if (move <= 0) return;
+            cacheStack.m_stack += move;                            // fill the existing cache stack directly
+            inv.RemoveItem(name, move);
+            Plugin.SaveCrateInvIfClosed(player, crateInv);
         }
     }
 
@@ -7488,6 +7740,65 @@ namespace EnvReporter
         }
     }
 
+    // ── Smelt/kiln/furnace/windmill/spinning-wheel input from cache ──────────────
+    // Fuel already flows from the cache (OnAddFuel rides the public HaveItem + RemoveItem(string,…) patches —
+    // that's why coal/ice work). The INPUT (ore/wood/flax/barley) goes through Smelter.OnAddOre → the private
+    // FindCookableItem, which only sees the player's own inventory. Two reasons a postfix on FindCookableItem
+    // fails: (1) OnAddOre then needs item.m_dropPrefab for IsItemAllowed + RPC_AddOre, which a deserialized
+    // cache item lacks; (2) FindCookableItem is tiny/private and gets inlined into OnAddOre, so the postfix
+    // never runs. OnAddOre itself is a Switch.Callback delegate target → never inlined → safe to patch. We top
+    // up the player's REAL inventory with one unit from the cache just before OnAddOre runs, let vanilla
+    // consume a genuine item (valid prefab), then settle: on success decrement the cache, on failure undo the
+    // top-up. All Smelter-based stations share this: smelter, blast furnace, charcoal kiln, windmill (a Smelter
+    // with an m_windmill), spinning wheel.
+    [HarmonyPatch(typeof(Smelter), "OnAddOre")]
+    static class CrateSmeltOrePatch
+    {
+        static void Prefix(Smelter __instance, Humanoid user, ItemDrop.ItemData item, out string __state)
+        {
+            __state = null;
+            var player = Player.m_localPlayer;
+            if (player == null || user != player || item != null) return;   // explicit item → already a real inv item
+            var inv = player.GetInventory();
+            // if the player already holds a cookable input, vanilla handles it — don't touch the cache
+            foreach (var c in __instance.m_conversion)
+            {
+                var nm0 = c?.m_from?.m_itemData?.m_shared?.m_name;
+                if (!string.IsNullOrEmpty(nm0) && inv.GetItem(nm0) != null) return;
+            }
+            var crateInv = Plugin.GetCrateInvForRead(player);
+            if (crateInv == null) return;
+            foreach (var c in __instance.m_conversion)
+            {
+                if (c?.m_from == null) continue;
+                var nm = c.m_from.m_itemData?.m_shared?.m_name;
+                if (string.IsNullOrEmpty(nm) || crateInv.GetItem(nm) == null) continue;
+                // pull one real unit into the player's inventory so vanilla OnAddOre finds a genuine item
+                var added = inv.AddItem(c.m_from.gameObject.name, 1, 1, 0, 0L, "", false);
+                if (added != null) __state = nm;   // remember the shared name to settle against the cache
+                return;
+            }
+        }
+
+        static void Postfix(string __state, bool __result)
+        {
+            if (__state == null) return;
+            var player = Player.m_localPlayer;
+            if (player == null) return;
+            if (__result)
+            {
+                // vanilla consumed our topped-up unit from the inventory → consume it from the cache for real
+                var crateInv = Plugin.GetCrateInvForRead(player);
+                if (crateInv != null) { crateInv.RemoveItem(__state, 1); Plugin.SaveCrateInvIfClosed(player, crateInv); }
+            }
+            else
+            {
+                // the add didn't happen (station full, bad item, …) → undo the top-up, leave the cache alone
+                player.GetInventory().RemoveItem(__state, 1);
+            }
+        }
+    }
+
     // ── Block crafting a second cache + per-quality upgrade requirements ─────────
 
     [HarmonyPatch(typeof(Player), nameof(Player.HaveRequirements),
@@ -7946,11 +8257,15 @@ namespace EnvReporter
         public string SheetSidecarSprite { get; set; } = "woodpanel_password";   // legendaries sidecar sprite (blank = same as sheet)
         public float  SheetPanelZoom    { get; set; } = 1f;
         // --- legendaries (Unique tier) ---
-        public float  LegendaryChance   { get; set; } = 0.01f;   // 0.6.1: 20%->1% (uniques far too common per playtest); per card slot chance to roll a keystone
+        public float  LegendaryChance   { get; set; } = 0.02f;   // 0.6.1: 20%->1% (too common); 0.6.2: 1%->2% (1% too stingy, 5% too rich) — per card slot chance to roll a keystone
         public float  AttrW1            { get; set; } = 40f;     // numeric boon: relative weight to roll 1 attribute
         public float  AttrW2            { get; set; } = 30f;     // ...2 attributes
         public float  AttrW3            { get; set; } = 20f;     // ...3 attributes
         public float  AttrW4            { get; set; } = 10f;     // ...4 attributes
+        // 0.6.2 roll-structure: concentrate boons by occasionally re-rolling an axis already used this boon,
+        // and make individual rolls more extreme (gifts bigger, takes worse) so rolls feel influential.
+        public float  RepeatAxisChance  { get; set; } = 0.30f;   // chance a later attribute re-targets an axis already rolled this boon
+        public bool   BiasedMagnitude   { get; set; } = true;    // gift = better of two 0–10 rolls, take = worse (bigger) of two
         // axis roll-weight buckets (relative; baseline = 1). Generals are rare because any general forces Rare rarity.
         public float  WeightGeneral     { get; set; } = 0.3f;    // Damage, Defense, StaminaUse, Survival
         public float  WeightResist      { get; set; } = 0.2f;    // the 8 per-type resistances (0.6.1: 0.5->0.2, were overpowered + too frequent)
@@ -8029,6 +8344,7 @@ namespace EnvReporter
                     ["kindle"]        = new RitualItemConfig { Enabled = true, Item = "Resin",         HoverText = "Kindle nearby fires",        Message = "The darkness yields.",                                                     Domain = "Blessings" },
                     ["repair"]        = new RitualItemConfig { Enabled = true, Item = "Coal",          HoverText = "Mend your works",            Message = "The fire remembers. Your works are mended.",                               Domain = "Blessings" },
                     ["giant"]         = new RitualItemConfig { Enabled = true, Item = "YmirRemains",   HoverText = "Become the mountain",        Message = "The mountain answers. You are vast.", Duration = 60f,                     Domain = "Blessings" },
+                    ["bountiful"]     = new RitualItemConfig { Enabled = true, Item = "Fish*",         HoverText = "Invoke the gods' bounty",    Message = "The gods bless your bounty.", Duration = 60f, Domain = "Blessings" },
                     ["burden"]        = new RitualItemConfig { Enabled = true, Item = "RawMeat",       HoverText = "Carry great burdens",        Message = "The weight is yours to bear.", Duration = 60f, CarryBonus = 1000f,         Domain = "Blessings" },
                     ["ward_bubble"]   = new RitualItemConfig { Enabled = true, Item = "Amber",         HoverText = "Carry the shield",          Message = "A ward rises. None shall pass.", Duration = 300f,                         Domain = "Blessings" },
                     ["campfire_ward"] = new RitualItemConfig { Enabled = true, Item = "AmberPearl",    HoverText = "Raise a sanctuary",          Message = "A sanctuary rises. None shall enter.", Duration = 60f,                    Domain = "Blessings" },
@@ -8079,6 +8395,7 @@ namespace EnvReporter
         public bool  WeightContents { get; set; } = true;
         public float WeightScale    { get; set; } = 0.5f;
         public bool  SurvivesDeath  { get; set; } = true;
+        public bool  FillStacksOnPickup { get; set; } = true;  // picked items top up an EXISTING cache stack before overflowing to inventory
     }
 
     public class CartsConfig
