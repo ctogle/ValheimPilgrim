@@ -12,7 +12,7 @@ using YamlDotNet.RepresentationModel;
 
 namespace EnvReporter
 {
-    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.6.1")]
+    [BepInPlugin("com.ctogle.pilgrim", "Pilgrim", "0.6.2")]
     // Soft-dep so BepInEx loads us AFTER ZenItemStands (when present) — otherwise its assembly isn't loaded
     // when our Awake patches run and AccessTools.TypeByName("ZenItemStands.StandInventory") can't resolve.
     [BepInDependency("ZenDragon.ZenItemStands", BepInDependency.DependencyFlags.SoftDependency)]
@@ -1043,11 +1043,6 @@ namespace EnvReporter
                 args.Context.AddString($"{names.Count} vfx/fx match '{kw}' — also in log");
                 Log.LogInfo($"[Pilgrim] VFX LIST ({names.Count}) kw='{kw}': {string.Join(", ", names)}");
             });
-            new Terminal.ConsoleCommand("pilgrim_vfx", "spawn a vfx on you to preview <name>", args =>
-            {
-                if (args.Length < 2) { args.Context.AddString("usage: pilgrim_vfx <prefabName>"); return; }
-                args.Context.AddString(BoonFx.Preview(args[1]));
-            });
             new Terminal.ConsoleCommand("pilgrim_vfx_tune", "spawn vfx w/ params: <name> [scale] [density] [lifetime] [r g b]", args =>
             {
                 if (args.Length < 2) { args.Context.AddString("usage: pilgrim_vfx_tune <name> [scale] [density] [lifetime] [r g b]"); return; }
@@ -1056,140 +1051,12 @@ namespace EnvReporter
                 Color? tint = args.Length >= 8 ? new Color(F(5, 1f), F(6, 1f), F(7, 1f)) : (Color?)null;
                 args.Context.AddString(BoonFx.PreviewTuned(args[1], scale, density, life, tint));
             });
-            new Terminal.ConsoleCommand("pilgrim_ui_dump", "list on-screen panel Images (sprite/size/ppu) [keyword]", args =>
-            {
-                string kw = args.Length > 1 ? args[1].ToLowerInvariant() : "";
-                var rows = UnityEngine.Resources.FindObjectsOfTypeAll<UnityEngine.UI.Image>()
-                    .Where(i => i != null && i.sprite != null && i.gameObject.scene.IsValid())      // live scene UI, not asset prefabs
-                    .Where(i => i.sprite.border != UnityEngine.Vector4.zero)                         // sliced panels only
-                    .Select(i => new { img = i, r = i.rectTransform.rect, path = GoPath(i.transform) })
-                    .Where(x => kw == "" || x.path.ToLowerInvariant().Contains(kw) || x.img.sprite.name.ToLowerInvariant().Contains(kw))
-                    .OrderByDescending(x => System.Math.Abs(x.r.width * x.r.height))
-                    .Take(40).ToList();
-                args.Context.AddString($"{rows.Count} sliced UI panels (biggest first) — also written to log:");
-                Log.LogInfo($"[Pilgrim] UI DUMP: {rows.Count} sliced panels (kw='{kw}')");
-                foreach (var x in rows)
-                {
-                    string line = $"{x.r.width:0}x{x.r.height:0} ppu{x.img.pixelsPerUnitMultiplier:0.#} '{x.img.sprite.name}' {(x.img.gameObject.activeInHierarchy ? "" : "(hidden) ")}@ {x.path}";
-                    args.Context.AddString("  " + line);
-                    Log.LogInfo("[Pilgrim]   " + line);
-                }
-            });
 
-            new Terminal.ConsoleCommand("pilgrim_sprites_dump", "export all loaded UI sprites to PNGs you can scroll through [keyword]", args =>
-            {
-                string kw = args.Length > 1 ? args[1].ToLowerInvariant() : "";
-                string outDir = Path.Combine(Paths.ConfigPath, "PilgrimSprites");
-                Directory.CreateDirectory(outDir);
-                var readable = new Dictionary<int, Texture2D>();   // cache per source texture
-                var used = new Dictionary<string, int>();          // dedupe names
-                int ok = 0, fail = 0;
 
-                Texture2D Readable(Texture2D src)
-                {
-                    if (readable.TryGetValue(src.GetInstanceID(), out var r)) return r;
-                    var rt = RenderTexture.GetTemporary(src.width, src.height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
-                    Graphics.Blit(src, rt);
-                    var prev = RenderTexture.active; RenderTexture.active = rt;
-                    r = new Texture2D(src.width, src.height, TextureFormat.RGBA32, false);
-                    r.ReadPixels(new Rect(0, 0, src.width, src.height), 0, 0); r.Apply();
-                    RenderTexture.active = prev; RenderTexture.ReleaseTemporary(rt);
-                    readable[src.GetInstanceID()] = r; return r;
-                }
 
-                var sprites = UnityEngine.Resources.FindObjectsOfTypeAll<Sprite>()
-                    .Where(s => s != null && s.texture != null && !string.IsNullOrEmpty(s.name))
-                    .Where(s => kw == "" || s.name.ToLowerInvariant().Contains(kw))
-                    .GroupBy(s => s.name).Select(g => g.First())   // one per unique name
-                    .ToList();
-                args.Context.AddString($"Exporting {sprites.Count} sprites to {outDir} …");
-                Log.LogInfo($"[Pilgrim] sprite dump → {outDir} ({sprites.Count} sprites, kw='{kw}')");
-                var manifest = new List<string>();
 
-                foreach (var s in sprites)
-                {
-                    try
-                    {
-                        var rd = Readable(s.texture);
-                        var tr = s.textureRect;
-                        int x = Mathf.Clamp((int)tr.x, 0, rd.width - 1), y = Mathf.Clamp((int)tr.y, 0, rd.height - 1);
-                        int w = Mathf.Clamp((int)tr.width, 1, rd.width - x), h = Mathf.Clamp((int)tr.height, 1, rd.height - y);
-                        var px = rd.GetPixels(x, y, w, h);
-                        var outTex = new Texture2D(w, h, TextureFormat.RGBA32, false);
-                        outTex.SetPixels(px); outTex.Apply();
-                        string nm = s.name; foreach (char c in Path.GetInvalidFileNameChars()) nm = nm.Replace(c, '_');
-                        if (used.TryGetValue(nm, out int n)) { used[nm] = n + 1; nm = $"{nm}_{n}"; } else used[nm] = 1;
-                        File.WriteAllBytes(Path.Combine(outDir, nm + ".png"), outTex.EncodeToPNG());
-                        Object.Destroy(outTex); ok++;
-                        var b = s.border;
-                        bool sliced = b != Vector4.zero;
-                        manifest.Add($"{s.name,-40} {w}x{h,-10} {(sliced ? $"9-slice border L{b.x:0} B{b.y:0} R{b.z:0} T{b.w:0}" : "flat (no 9-slice)")}");
-                    }
-                    catch (System.Exception e) { fail++; Log.LogWarning($"[Pilgrim]   sprite '{s.name}' failed: {e.Message}"); }
-                }
-                foreach (var t in readable.Values) Object.Destroy(t);
-                manifest.Sort();
-                File.WriteAllText(Path.Combine(outDir, "_manifest.txt"),
-                    "sprite name                              size       9-slice border (left bottom right top)\n" +
-                    "----------------------------------------------------------------------------------------\n" +
-                    string.Join("\n", manifest));
-                string msg = $"Done: {ok} exported, {fail} failed → {outDir} (see _manifest.txt for sizes + 9-slice borders)";
-                args.Context.AddString(msg); Log.LogInfo("[Pilgrim] " + msg);
-            });
-
-            new Terminal.ConsoleCommand("pilgrim_enemy_hp", "dump creature base health (for XP tuning) to log + file", args =>
-            {
-                var zs = ZNetScene.instance;
-                if (zs == null) { args.Context.AddString("ZNetScene not ready"); return; }
-                var rows = new List<string>();
-                foreach (var pf in zs.m_prefabs)
-                {
-                    if (pf == null) continue;
-                    var ch = pf.GetComponent<Character>();
-                    if (ch == null || ch is Player) continue;
-                    float hp = Traverse.Create(ch).Field("m_health").GetValue<float>();
-                    var fac = Traverse.Create(ch).Field("m_faction").GetValue<Character.Faction>();
-                    bool boss = Traverse.Create(ch).Field("m_boss").GetValue<bool>();
-                    rows.Add($"{hp,7:0}  {fac,-12} {(boss ? "BOSS " : "     ")}{pf.name}");
-                }
-                rows.Sort((a, b) => float.Parse(a.Substring(0, 7)).CompareTo(float.Parse(b.Substring(0, 7))));
-                string outPath = Path.Combine(Paths.ConfigPath, "pilgrim_enemy_hp.txt");
-                File.WriteAllText(outPath, "  HP   faction      name\n----------------------------------------\n" + string.Join("\n", rows));
-                args.Context.AddString($"{rows.Count} creatures → {outPath}");
-                Log.LogInfo($"[Pilgrim] enemy hp dump ({rows.Count}) → {outPath}");
-            });
-
-            new Terminal.ConsoleCommand("pilgrim_whichpanel", "find the panel sprite hosting the trophies/achievements buttons", args =>
-            {
-                // locate the buttons by name, then walk ancestors for the first sliced-panel Image
-                var btns = UnityEngine.Resources.FindObjectsOfTypeAll<UnityEngine.UI.Button>()
-                    .Where(b => b != null && b.gameObject.scene.IsValid())
-                    .Where(b => { string n = b.name.ToLowerInvariant(); return n.Contains("trophy") || n.Contains("trophies") || n.Contains("achiev"); })
-                    .ToList();
-                args.Context.AddString($"{btns.Count} trophy/achievement buttons — also written to log:");
-                Log.LogInfo($"[Pilgrim] WHICHPANEL: {btns.Count} trophy/achievement buttons");
-                foreach (var b in btns)
-                {
-                    Log.LogInfo($"[Pilgrim]   button '{b.name}' @ {GoPath(b.transform)}");
-                    args.Context.AddString($"  button '{b.name}' @ {GoPath(b.transform)}");
-                    var t = b.transform;
-                    while (t != null)
-                    {
-                        var img = t.GetComponent<UnityEngine.UI.Image>();
-                        if (img != null && img.sprite != null && img.sprite.border != UnityEngine.Vector4.zero)
-                        {
-                            var r = img.rectTransform.rect;
-                            string line = $"    -> PANEL '{img.sprite.name}' {r.width:0}x{r.height:0} ppu{img.pixelsPerUnitMultiplier:0.#} @ {GoPath(img.transform)}";
-                            args.Context.AddString(line);
-                            Log.LogInfo("[Pilgrim] " + line);
-                        }
-                        t = t.parent;
-                    }
-                }
-            });
-
-            // ── ath_envstate ────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_envstate", "world env, TOD, raid, wind", args =>
+            // ── pilgrim_envstate ────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_envstate", "world env, TOD, raid, wind", args =>
             {
                 var em = EnvMan.instance;
                 if (em == null) { args.Context.AddString("EnvMan not ready."); return; }
@@ -1231,8 +1098,8 @@ namespace EnvReporter
                 }
             });
 
-            // ── ath_playerstats ─────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_playerstats", "all players stats + party spread", args =>
+            // ── pilgrim_playerstats ─────────────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_playerstats", "all players stats + party spread", args =>
             {
                 var players = Player.GetAllPlayers();
                 if (players == null || players.Count == 0) { args.Context.AddString("No players found."); return; }
@@ -1274,8 +1141,8 @@ namespace EnvReporter
                 }
             });
 
-            // ── ath_clearenv ────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_clearenv", "cancel all Pilgrim weather overrides", args =>
+            // ── pilgrim_clearenv ────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_clearenv", "cancel all Pilgrim weather overrides", args =>
             {
                 ClearSkiesExpiry = 0f;
                 RainExpiry       = 0f;
@@ -1290,15 +1157,15 @@ namespace EnvReporter
                 args.Context.AddString("Weather overrides cleared.");
             });
 
-            // ── ath_seek ────────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_seek", "point wind toward next boss altar", args =>
+            // ── pilgrim_seek ────────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_seek", "point wind toward next boss altar", args =>
             {
                 ActivateSeek(args.Context);
             });
 
-            // ── ath_schedule ────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_schedule",
-                "ath_schedule [on|off|prob <0-1>|night <e1,e2>|noon <e1,e2>]", args =>
+            // ── pilgrim_schedule ────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_schedule",
+                "pilgrim_schedule [on|off|prob <0-1>|night <e1,e2>|noon <e1,e2>]", args =>
             {
                 var s = Scheduler;
                 if (s == null) { args.Context.AddString("Scheduler not ready."); return; }
@@ -1323,8 +1190,8 @@ namespace EnvReporter
                 }
             });
 
-            // ── ath_waterwalk ────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_waterwalk", "walk on water for 2 minutes", args =>
+            // ── pilgrim_waterwalk ────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_waterwalk", "walk on water for 2 minutes", args =>
             {
                 var p = Player.m_localPlayer;
                 if (p == null) { args.Context.AddString("No local player."); return; }
@@ -1332,9 +1199,9 @@ namespace EnvReporter
                 args.Context.AddString("Water walk active.");
             });
 
-            // ── ath_bird ─────────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_bird",
-                "ath_bird [n|s|e|w] — send a crow flying in a direction (default: north)", args =>
+            // ── pilgrim_bird ─────────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_bird",
+                "pilgrim_bird [n|s|e|w] — send a crow flying in a direction (default: north)", args =>
             {
                 if (Scheduler == null) { args.Context.AddString("Scheduler not ready."); return; }
                 string dir = args.Length > 1 ? args[1].ToLower() : "n";
@@ -1348,8 +1215,8 @@ namespace EnvReporter
                 args.Context.AddString($"Bird away ({dir}).");
             });
 
-            // ── ath_traders ─────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_traders",
+            // ── pilgrim_traders ─────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_traders",
                 "show trader met status and distances", args =>
             {
                 var player = Player.m_localPlayer;
@@ -1364,8 +1231,8 @@ namespace EnvReporter
                 }
             });
 
-            // ── ath_rituals ─────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_rituals",
+            // ── pilgrim_rituals ─────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_rituals",
                 "list available campfire rituals", args =>
             {
                 args.Context.AddString("=== Campfire Rituals ===");
@@ -1377,9 +1244,9 @@ namespace EnvReporter
                 args.Context.AddString($"Global cooldown: {RitualCooldownDuration}s. Hold item in slot 1, look at burning campfire, press 1.");
             });
 
-            // ── ath_hints ───────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_hints",
-                "ath_hints [on|off] — toggle campfire ritual hover hint text", args =>
+            // ── pilgrim_hints ───────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_hints",
+                "pilgrim_hints [on|off] — toggle campfire ritual hover hint text", args =>
             {
                 bool newVal = args.Args.Length > 1
                     ? args.Args[1].ToLower() == "on"
@@ -1388,9 +1255,9 @@ namespace EnvReporter
                 args.Context.AddString($"Ritual hints: {(ShowHintsEnabled ? "ON" : "OFF")}");
             });
 
-            // ── ath_learn / ath_forget ──────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_learn",
-                "ath_learn [ritual|all] — unlock ritual discovery (for testing)", args =>
+            // ── pilgrim_learn / pilgrim_forget ──────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_learn",
+                "pilgrim_learn [ritual|all] — unlock ritual discovery (for testing)", args =>
             {
                 var player = Player.m_localPlayer;
                 if (player == null) return;
@@ -1403,8 +1270,8 @@ namespace EnvReporter
                 args.Context.AddString(target == "all" ? "All rituals learned." : $"Learned: {target}");
             });
 
-            new Terminal.ConsoleCommand("ath_ritual_kit",
-                "ath_ritual_kit — spawn one of each ritual ingredient into your inventory", args =>
+            new Terminal.ConsoleCommand("pilgrim_ritual_kit",
+                "pilgrim_ritual_kit — spawn one of each ritual ingredient into your inventory", args =>
             {
                 var player = Player.m_localPlayer;
                 if (player == null) return;
@@ -1423,8 +1290,8 @@ namespace EnvReporter
                 args.Context.AddString($"Ritual kit: {spawned} items added, {skipped} prefabs not found.");
             });
 
-            new Terminal.ConsoleCommand("ath_forget",
-                "ath_forget [ritual|all] — reset ritual discovery", args =>
+            new Terminal.ConsoleCommand("pilgrim_forget",
+                "pilgrim_forget [ritual|all] — reset ritual discovery", args =>
             {
                 var player = Player.m_localPlayer;
                 if (player == null) return;
@@ -1437,9 +1304,9 @@ namespace EnvReporter
                 args.Context.AddString(target == "all" ? "All rituals forgotten." : $"Forgotten: {target}");
             });
 
-            // ── ath_rituals ─────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_rituals",
-                "ath_rituals — print ritual usage history for this character", args =>
+            // ── pilgrim_ritual_history ─────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_ritual_history",
+                "pilgrim_ritual_history — print ritual usage history for this character", args =>
             {
                 var player = Player.m_localPlayer;
                 if (player == null) return;
@@ -1456,9 +1323,9 @@ namespace EnvReporter
                 foreach (var line in lines) args.Context.AddString(line);
             });
 
-            // ── ath_inspect ─────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_inspect",
-                "ath_inspect — identify the nearest structure and report its composition", args =>
+            // ── pilgrim_inspect ─────────────────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_inspect",
+                "pilgrim_inspect — identify the nearest structure and report its composition", args =>
             {
                 var player = Player.m_localPlayer;
                 if (player == null) return;
@@ -1618,163 +1485,14 @@ namespace EnvReporter
                 ((MonoBehaviour)plugin).StartCoroutine(FlashPieces(visited.Select(w => w.gameObject).ToList()));
             });
 
-            // ── ath_prefabs ─────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_prefabs",
-                "ath_prefabs <pattern> — list registered ZNetScene prefab names matching pattern", args =>
-            {
-                var scene = ZNetScene.instance;
-                if (scene == null) { args.Context.AddString("ZNetScene not ready."); return; }
-                var rf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
-                var dict = typeof(ZNetScene).GetField("m_namedPrefabs", rf)?.GetValue(scene) as Dictionary<int, GameObject>;
-                if (dict == null) { args.Context.AddString("Could not read prefab list."); return; }
-                string pattern = args.Length > 1 ? args[1].ToLower() : "";
-                var matches = dict.Values.Where(g => g != null && (string.IsNullOrEmpty(pattern) || g.name.ToLower().Contains(pattern)))
-                    .Select(g => g.name).OrderBy(n => n).ToList();
-                args.Context.AddString($"=== {matches.Count} prefabs matching '{pattern}' ===");
-                foreach (var n in matches) args.Context.AddString($"  {n}");
-            });
 
-            // ── ath_transmats ───────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_transmats",
-                "ath_transmats — list all unique transparent/translucent materials across all prefabs", args =>
-            {
-                var scene = ZNetScene.instance;
-                if (scene == null) { args.Context.AddString("ZNetScene not ready."); return; }
-                var rf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
-                var dict = typeof(ZNetScene).GetField("m_namedPrefabs", rf)?.GetValue(scene) as Dictionary<int, GameObject>;
-                if (dict == null) { args.Context.AddString("Could not read prefab list."); return; }
 
-                // key = "matName | shaderName", value = one example prefab
-                var seen = new Dictionary<string, string>();
-                foreach (var go in dict.Values)
-                {
-                    if (go == null) continue;
-                    foreach (var r in go.GetComponentsInChildren<Renderer>(true))
-                    {
-                        foreach (var m in r.sharedMaterials)
-                        {
-                            if (m == null || m.shader == null) continue;
-                            var sn = m.shader.name;
-                            // transparent = render queue >= 2450, or shader name hints
-                            bool isTransparent = m.renderQueue >= 2450
-                                || sn.Contains("Transparent") || sn.Contains("Alpha")
-                                || sn.Contains("Particle") || sn.Contains("Unlit");
-                            if (!isTransparent) continue;
-                            var key = $"{m.name} | {sn}";
-                            if (!seen.ContainsKey(key)) seen[key] = go.name;
-                        }
-                    }
-                }
-                args.Context.AddString($"=== {seen.Count} transparent materials ===");
-                foreach (var kv in seen.OrderBy(k => k.Key))
-                    args.Context.AddString($"  {kv.Key}  (eg: {kv.Value})");
-            });
 
-            // ── ath_mats ────────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_mats",
-                "ath_mats <prefabName> — list all renderers and shader names on a prefab", args =>
-            {
-                if (args.Length < 2) { args.Context.AddString("Usage: ath_mats <prefabName>"); return; }
-                var go = ZNetScene.instance?.GetPrefab(args[1]);
-                if (go == null) { args.Context.AddString($"Prefab '{args[1]}' not found."); return; }
-                foreach (var r in go.GetComponentsInChildren<Renderer>(includeInactive: true))
-                    foreach (var m in r.sharedMaterials)
-                        if (m != null) args.Context.AddString($"  {r.gameObject.name} | {m.name} | {m.shader?.name}");
-            });
 
-            // ── ath_wardmat ─────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_wardmat",
-                "ath_wardmat <matName> — hot-swap the active campfire ward sphere material", args =>
-            {
-                if (args.Length < 2) { args.Context.AddString("Usage: ath_wardmat <matName>"); return; }
-                var rend = Plugin.ActiveCampfireWardRend;
-                if (rend == null) { args.Context.AddString("[wardmat] No active campfire ward."); return; }
 
-                string target = args[1].ToLower();
-                var scene = ZNetScene.instance;
-                if (scene == null) { args.Context.AddString("ZNetScene not ready."); return; }
 
-                var rf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
-                var dict = typeof(ZNetScene).GetField("m_namedPrefabs", rf)?.GetValue(scene) as Dictionary<int, GameObject>;
-                if (dict == null) { args.Context.AddString("Could not read prefab list."); return; }
-
-                Material? found = null;
-                string? foundOn = null;
-                foreach (var go in dict.Values)
-                {
-                    if (go == null) continue;
-                    foreach (var r in go.GetComponentsInChildren<Renderer>(true))
-                        foreach (var m in r.sharedMaterials)
-                            if (m != null && m.name.ToLower() == target)
-                            { found = m; foundOn = go.name; break; }
-                    if (found != null) break;
-                }
-
-                if (found == null) { args.Context.AddString($"[wardmat] Material '{args[1]}' not found in any prefab."); return; }
-
-                var mat = new Material(found);
-                mat.SetInt("_Cull", 0);
-                if (mat.HasProperty("_Color"))       mat.color = new Color(0.55f, 0f, 1f, 0.15f);
-                if (mat.HasProperty("_TintColor"))   mat.SetColor("_TintColor", new Color(0.55f, 0f, 1f, 0.15f));
-                rend.material = mat;
-                args.Context.AddString($"[wardmat] Applied '{found.name}' (shader: {found.shader?.name}) from {foundOn}");
-            });
-
-            // ── ath_vfx ─────────────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_vfx",
-                "ath_vfx <prefabName|list> — preview a VFX at your position, or list all vfx_ prefabs", args =>
-            {
-                var scene = ZNetScene.instance;
-                if (scene == null) { args.Context.AddString("ZNetScene not ready."); return; }
-
-                var rf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
-                var dictField = typeof(ZNetScene).GetField("m_namedPrefabs", rf);
-                var dict = dictField?.GetValue(scene) as Dictionary<int, GameObject>;
-
-                if (args.Length < 2 || args[1] == "list")
-                {
-                    if (dict == null) { args.Context.AddString("Could not read prefab list."); return; }
-                    var names = dict.Values.Where(g => g != null)
-                        .Select(g => g.name)
-                        .Where(n => n.StartsWith("vfx_") || n.StartsWith("fx_") || n.StartsWith("sfx_"))
-                        .OrderBy(n => n).ToList();
-                    args.Context.AddString($"=== {names.Count} VFX prefabs ===");
-                    foreach (var n in names) args.Context.AddString($"  {n}");
-                    return;
-                }
-
-                var player = Player.m_localPlayer;
-                if (player == null) return;
-                var prefab = scene.GetPrefab(args[1]);
-                if (prefab == null) { args.Context.AddString($"Prefab '{args[1]}' not found."); return; }
-                Object.Instantiate(prefab, player.transform.position, Quaternion.identity);
-                args.Context.AddString($"Spawned {args[1]}");
-            });
-
-            // ── ath_cleanup_vfx ─────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_cleanup_vfx",
-                "ath_cleanup_vfx <prefabName> — destroy all ZNet instances of a prefab in the world", args =>
-            {
-                if (args.Length < 2) { args.Context.AddString("Usage: ath_cleanup_vfx <prefabName>"); return; }
-                var targetName = args[1];
-                var scene = ZNetScene.instance;
-                var zdoMan = ZDOMan.instance;
-                if (scene == null || zdoMan == null) { args.Context.AddString("Not ready."); return; }
-                var batch = new List<ZDO>();
-                int idx = 0, count = 0;
-                // GetAllZDOsWithPrefabIterative needs multiple calls until it returns true
-                while (!zdoMan.GetAllZDOsWithPrefabIterative(targetName, batch, ref idx)) { }
-                foreach (var zdo in batch)
-                {
-                    var nview = scene.FindInstance(zdo);
-                    if (nview != null) { ZNetScene.instance.Destroy(nview.gameObject); count++; }
-                    else { zdoMan.DestroyZDO(zdo); count++; }
-                }
-                args.Context.AddString($"Destroyed {count} instances of '{targetName}'.");
-            });
-
-            // ── ath_upgradecart ─────────────────────────────────────────────
-            new Terminal.ConsoleCommand("ath_upgradecart",
+            // ── pilgrim_upgrade_cart ─────────────────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_upgrade_cart",
                 "upgrade nearest cart capacity (or Shift+E on cart)", args =>
             {
                 var player = Player.m_localPlayer;
@@ -1784,8 +1502,8 @@ namespace EnvReporter
                 CartUpgrade.Upgrade(player, cart, args);
             });
 
-            // ── ath_envlist / ath_envdump ───────────────────────────────────
-            new Terminal.ConsoleCommand("ath_envlist", "lists all registered environments", args =>
+            // ── pilgrim_envlist ───────────────────────────────────
+            new Terminal.ConsoleCommand("pilgrim_envlist", "lists all registered environments", args =>
             {
                 var em = EnvMan.instance;
                 if (em == null) { args.Context.AddString("EnvMan not ready."); return; }
@@ -1793,55 +1511,8 @@ namespace EnvReporter
                 foreach (var e in em.m_environments) args.Context.AddString($"  {e.m_name}");
             });
 
-            new Terminal.ConsoleCommand("ath_birdparams", "dump RandomFlyingBird fields and animator params on nearby birds", args =>
-            {
-                var player = Player.m_localPlayer;
-                if (player == null) return;
-                int found = 0;
-                foreach (var mb in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>())
-                {
-                    if (mb == null || mb.GetType().Name != "RandomFlyingBird") continue;
-                    if (Vector3.Distance(mb.transform.position, player.transform.position) > 60f) continue;
-                    found++;
-                    args.Context.AddString($"--- Bird {found} ({mb.gameObject.name}) ---");
-                    var rf = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
-                    foreach (var f in mb.GetType().GetFields(rf))
-                    {
-                        try { args.Context.AddString($"  {f.FieldType.Name} {f.Name} = {f.GetValue(mb)}"); }
-                        catch { }
-                    }
-                    foreach (var comp in mb.GetComponentsInChildren<UnityEngine.Component>())
-                    {
-                        var getParams = comp?.GetType().GetProperty("parameters");
-                        if (getParams == null) continue;
-                        var ps = getParams.GetValue(comp) as System.Array;
-                        if (ps == null) continue;
-                        foreach (var p in ps)
-                        {
-                            var nameProp = p.GetType().GetProperty("name");
-                            var typeProp = p.GetType().GetProperty("type");
-                            args.Context.AddString($"  Anim param: {nameProp?.GetValue(p)} ({typeProp?.GetValue(p)})");
-                        }
-                    }
-                }
-                if (found == 0) args.Context.AddString("No birds within 60m.");
-            });
 
 
-            new Terminal.ConsoleCommand("ath_envdump", "dumps env-related EnvMan fields", args =>
-            {
-                var em = EnvMan.instance;
-                if (em == null) { args.Context.AddString("EnvMan not ready."); return; }
-                foreach (var f in typeof(EnvMan).GetFields(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
-                {
-                    string n = f.Name;
-                    if (!n.ToLower().Contains("env") && !n.ToLower().Contains("current") && !n.ToLower().Contains("debug") && !n.ToLower().Contains("time")) continue;
-                    var val = f.GetValue(em);
-                    string display = val == null ? "null" : val.ToString()!;
-                    if (val is EnvSetup es) display = $"EnvSetup({es.m_name})";
-                    args.Context.AddString($"{f.FieldType.Name} {n} = {display}");
-                }
-            });
         }
 
         // ── Env helper: set debugEnv only if the name is registered, fall back to vanilla ──
@@ -2694,7 +2365,7 @@ namespace EnvReporter
             player.Message(MessageHud.MessageType.TopLeft, "The ward fades.");
         }
 
-        // ── Structure BFS (shared by ath_inspect and repair ritual) ──────────
+        // ── Structure BFS (shared by pilgrim_inspect and repair ritual) ──────────
 
         internal static HashSet<WearNTear> FloodFillStructure(WearNTear seed, float stepRadius = 5f)
         {
@@ -8266,6 +7937,9 @@ namespace EnvReporter
         // and make individual rolls more extreme (gifts bigger, takes worse) so rolls feel influential.
         public float  RepeatAxisChance  { get; set; } = 0.30f;   // chance a later attribute re-targets an axis already rolled this boon
         public bool   BiasedMagnitude   { get; set; } = true;    // gift = better of two 0–10 rolls, take = worse (bigger) of two
+        public float  PatronSetBonusK   { get; set; } = 1f;      // same-patron (Rare+) set bonus = k*n^2 to that patron's signature axis (n = count, n>=2)
+        public float  RareValueThreshold  { get; set; } = 10f;   // value-score >= this → Rare (0.6.2: 6->10, rares were ~2x too common)
+        public float  MagicValueThreshold { get; set; } = 5f;    // value-score >= this → Magic (was 3)
         // axis roll-weight buckets (relative; baseline = 1). Generals are rare because any general forces Rare rarity.
         public float  WeightGeneral     { get; set; } = 0.3f;    // Damage, Defense, StaminaUse, Survival
         public float  WeightResist      { get; set; } = 0.2f;    // the 8 per-type resistances (0.6.1: 0.5->0.2, were overpowered + too frequent)

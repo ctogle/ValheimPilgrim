@@ -61,6 +61,9 @@ namespace EnvReporter
         internal static float AttrW4 => C.AttrW4;
         internal static float RepeatAxisChance => C.RepeatAxisChance;
         internal static bool  BiasedMagnitude  => C.BiasedMagnitude;
+        internal static float PatronSetBonusK  => C.PatronSetBonusK;
+        internal static float RareValueThreshold  => C.RareValueThreshold;
+        internal static float MagicValueThreshold => C.MagicValueThreshold;
         internal static float WeightGeneral  => C.WeightGeneral;
         internal static float WeightResist   => C.WeightResist;
         internal static float WeightDmgType  => C.WeightDmgType;
@@ -279,30 +282,83 @@ namespace EnvReporter
             [BoonAxis.BlockForce]   = ("Bracing",    "Yielding"),
         };
 
-        // Axis → patron: a Rare+ boon is attributed to a patron named for the DOMAIN of its dominant gift, so the
-        // same kind of boon always carries the same name ("Bjorn's" = offense, "Hallveig's" = defense, …).
-        // Each domain has a small patron pool; a boon's dominant-gift axis deterministically picks one
-        // (so the SAME boon always carries the SAME name, but different axes in a domain vary the patron).
-        static readonly string[] PatronOffense  = { "Bjorn",    "Ragnar",  "Sigurd"   };
-        static readonly string[] PatronDefense  = { "Hallveig", "Torvald", "Gunnhild" };
-        static readonly string[] PatronStamina  = { "Gunnar",   "Ivar",    "Sten"     };
-        static readonly string[] PatronRegen    = { "Astrid",   "Yrsa",    "Eira"     };
-        static readonly string[] PatronMobility = { "Leif",     "Hjalti",  "Runa"     };
-        static readonly string[] PatronUtility  = { "Sigrun",   "Ulfar",   "Thora"    };
+        // ── Patrons ──────────────────────────────────────────────────────────────
+        // Each patron owns ONE signature axis (its "favor"). A Rare+ boon is named by its dominant-gift axis:
+        // if that axis has a dedicated patron it gets it; otherwise it's rolled — deterministically per boon
+        // (Boon.Seed), so the name is stable across reloads — among the patrons of that axis's DOMAIN. Set-bonus
+        // favors feed only these signature axes.
+        internal enum Dom { Offense, Defense, Stamina, Regen, Mobility, Utility }
 
-        internal static string Patron(BoonAxis a)
+        internal static readonly Dictionary<BoonAxis, string> AxisPatron = new()
         {
-            string[] pool;
+            // offense — per-type damage, plus stagger/backstab
+            [BoonAxis.DmgBlunt]="Hallbjörn", [BoonAxis.DmgSlash]="Hjörleif", [BoonAxis.DmgPierce]="Geirmund",
+            [BoonAxis.DmgFire]="Brand",      [BoonAxis.DmgFrost]="Ísleif",   [BoonAxis.DmgPoison]="Ormar",
+            [BoonAxis.DmgLightning]="Thorvald", [BoonAxis.DmgSpirit]="Véstein",
+            [BoonAxis.StaggerDealt]="Ragnar", [BoonAxis.BackstabDealt]="Sigurd",
+            // defense
+            [BoonAxis.FlatArmor]="Hallveig", [BoonAxis.ArmorPct]="Torvald", [BoonAxis.Parry]="Gunnhild",
+            [BoonAxis.BlockForce]="Steinarr", [BoonAxis.Stagger]="Thrud",   [BoonAxis.FallDamage]="Bygul",
+            // stamina
+            [BoonAxis.RunStamina]="Ivar", [BoonAxis.DodgeStamina]="Sten", [BoonAxis.AtkStamina]="Bersi",
+            [BoonAxis.SneakStamina]="Náttfari", [BoonAxis.BlockStamina]="Hallvard",
+            // regen
+            [BoonAxis.HpRegen]="Astrid", [BoonAxis.StamRegen]="Yrsa", [BoonAxis.EitrRegen]="Eira",
+            // mobility
+            [BoonAxis.MoveSpeed]="Leif", [BoonAxis.JumpHeight]="Hjalti", [BoonAxis.CrouchSpeed]="Runa",
+            // utility
+            [BoonAxis.CarryWeight]="Sigrun", [BoonAxis.Stealth]="Ulfar", [BoonAxis.SkillXp]="Thora",
+            [BoonAxis.WoodCutting]="Ask", [BoonAxis.Pickaxes]="Brokkr",
+        };
+
+        static Dom DomainOf(BoonAxis a)
+        {
             if (a == BoonAxis.Damage || DamageLeafSet.Contains(a) || a == BoonAxis.AttackSpeed
-                || a == BoonAxis.StaggerDealt || a == BoonAxis.BackstabDealt)            pool = PatronOffense;
-            else if (a == BoonAxis.Defense || DefenseParts.Contains(a) || a == BoonAxis.FlatArmor
-                || Def[a].Categorical)                                                  pool = PatronDefense;
-            else if (a == BoonAxis.StaminaUse || StaminaLeaves.Contains(a))             pool = PatronStamina;
-            else if (a == BoonAxis.HpRegen || a == BoonAxis.StamRegen || a == BoonAxis.EitrRegen) pool = PatronRegen;
-            else if (a == BoonAxis.MoveSpeed || a == BoonAxis.SwimSpeed
-                || a == BoonAxis.CrouchSpeed || a == BoonAxis.JumpHeight)               pool = PatronMobility;
-            else                                                                        pool = PatronUtility;
-            return pool[((int)a) % pool.Length];
+                || a == BoonAxis.StaggerDealt || a == BoonAxis.BackstabDealt)                return Dom.Offense;
+            if (a == BoonAxis.Defense || DefenseParts.Contains(a) || a == BoonAxis.FlatArmor
+                || Def[a].Categorical)                                                      return Dom.Defense;
+            if (a == BoonAxis.StaminaUse || StaminaLeaves.Contains(a))                       return Dom.Stamina;
+            if (a == BoonAxis.HpRegen || a == BoonAxis.StamRegen || a == BoonAxis.EitrRegen) return Dom.Regen;
+            if (a == BoonAxis.MoveSpeed || a == BoonAxis.SwimSpeed
+                || a == BoonAxis.CrouchSpeed || a == BoonAxis.JumpHeight)                    return Dom.Mobility;
+            return Dom.Utility;
+        }
+
+        // lazy-built (DomainOf depends on DamageLeafSet/DefenseParts/StaminaLeaves/Def, which init after this block)
+        static Dictionary<string, BoonAxis> _patronSig;
+        static Dictionary<Dom, string[]> _domainPatrons;
+        static void EnsurePatronTables()
+        {
+            if (_patronSig != null) return;
+            var sig = new Dictionary<string, BoonAxis>();
+            var dom = new Dictionary<Dom, List<string>>();
+            foreach (var kv in AxisPatron)
+            {
+                sig[kv.Value] = kv.Key;
+                var d = DomainOf(kv.Key);
+                if (!dom.TryGetValue(d, out var l)) { l = new List<string>(); dom[d] = l; }
+                l.Add(kv.Value);
+            }
+            foreach (var l in dom.Values) l.Sort(StringComparer.Ordinal);   // stable index across runs
+            _patronSig = sig;
+            _domainPatrons = dom.ToDictionary(k => k.Key, k => k.Value.ToArray());
+        }
+
+        // patron for a boon's dominant-gift axis; seed (Boon.Seed) spreads axes WITHOUT a dedicated patron
+        // deterministically across their domain's patrons.
+        internal static string Patron(BoonAxis axis, int seed)
+        {
+            EnsurePatronTables();
+            if (AxisPatron.TryGetValue(axis, out var p)) return p;
+            if (_domainPatrons.TryGetValue(DomainOf(axis), out var pool) && pool.Length > 0)
+                return pool[((seed % pool.Length) + pool.Length) % pool.Length];
+            return "Hallbjörn";   // unreachable (every domain has patrons)
+        }
+
+        internal static BoonAxis PatronSignature(string patronName)
+        {
+            EnsurePatronTables();
+            return _patronSig.TryGetValue(patronName, out var ax) ? ax : BoonAxis.Damage;
         }
 
         // the 8 per-type outgoing-damage axes → the DamageTypes field they feed
@@ -347,11 +403,13 @@ namespace EnvReporter
         // from the dedicated resistance branch, always paired resist/weak).
         internal static readonly BoonAxis[] NumericAxes = All.Where(a => !Def[a].Categorical).ToArray();
 
-        // axes that can actually be ROLLED. ResSpirit is excluded: no vanilla enemy deals spirit damage to a
-        // player, so a spirit *resistance* is always a dud. Its AxisDef stays (DmgSpirit is useful, and any
-        // already-owned ResSpirit boon still renders/applies) — it just won't come up in new draws.
+        // axes that can actually be ROLLED. Excluded:
+        //   ResSpirit  — no vanilla enemy deals spirit damage to a player, so a spirit resistance is always a dud.
+        //   AttackSpeed — the animator-speed hook isn't landing a visible effect (0.6.2); blocked until fixed.
+        // Their AxisDefs stay (already-owned boons still render/apply) — they just won't come up in new draws.
         // (DmgPoison/DmgLightning are kept: poison arrows + Draugr Fang deal poison; lightning exists rarely.)
-        internal static readonly BoonAxis[] Rollable = All.Where(a => a != BoonAxis.ResSpirit).ToArray();
+        static readonly HashSet<BoonAxis> NotRollable = new() { BoonAxis.ResSpirit, BoonAxis.AttackSpeed };
+        internal static readonly BoonAxis[] Rollable = All.Where(a => !NotRollable.Contains(a)).ToArray();
 
         // the 8 per-type resistance axes
         internal static readonly BoonAxis[] ResistAxes =
@@ -361,23 +419,25 @@ namespace EnvReporter
         };
 
         // net points → damage category (give/positive = resist ladder, take/negative = weak ladder)
-        // Ladder 3/6/10 (was 1/4/7): a single 0–10 roll can no longer hand out VeryResistant (needs net 10,
-        // i.e. a perfect roll or stacking two attributes). Immune (full negation) stays out of reach.
+        // Ladder 4/8/14 (0.6.2: raised from 3/6/10). The repeat-axis + biased-magnitude roll rules make stacking
+        // one axis easy, so VeryResistant was coming up on a single boon — now it needs net 14 (heavy stacking
+        // or accumulation across boons). Immune (full negation) stays out of reach.
+        internal const int ResistVeryThreshold = 14;   // net for VeryResistant; a single boon is clamped below this
         internal static HitData.DamageModifier Category(int net) =>
-            net >= 10 ? HitData.DamageModifier.VeryResistant
-          : net >= 6  ? HitData.DamageModifier.Resistant
-          : net >= 3  ? HitData.DamageModifier.SlightlyResistant
-          : net <= -10 ? HitData.DamageModifier.VeryWeak
-          : net <= -6 ? HitData.DamageModifier.Weak
-          : net <= -3 ? HitData.DamageModifier.SlightlyWeak
+            net >= ResistVeryThreshold ? HitData.DamageModifier.VeryResistant
+          : net >= 8  ? HitData.DamageModifier.Resistant
+          : net >= 4  ? HitData.DamageModifier.SlightlyResistant
+          : net <= -ResistVeryThreshold ? HitData.DamageModifier.VeryWeak
+          : net <= -8 ? HitData.DamageModifier.Weak
+          : net <= -4 ? HitData.DamageModifier.SlightlyWeak
           :             HitData.DamageModifier.Normal;
 
         // human text for a category net (positive = resist, negative = weak) — must match Category()'s ladder
         internal static string CatText(int net) =>
-            net >= 10 ? "Very resistant" : net >= 6 ? "Resistant" : net >= 3 ? "Slightly resistant"
-          : net <= -10 ? "Very weak" : net <= -6 ? "Weak" : net <= -3 ? "Slightly weak" : "";
+            net >= ResistVeryThreshold ? "Very resistant" : net >= 8 ? "Resistant" : net >= 4 ? "Slightly resistant"
+          : net <= -ResistVeryThreshold ? "Very weak" : net <= -8 ? "Weak" : net <= -4 ? "Slightly weak" : "";
 
-        internal const int ResistFloor = 3;   // minimum |net| for a categorical roll to have any effect
+        internal const int ResistFloor = 4;   // minimum |net| for a categorical roll to have any effect (matches ladder)
     }
 
     // ---- one axis on a rolled boon (Net > 0 = give, Net < 0 = take) -----------
@@ -392,6 +452,9 @@ namespace EnvReporter
 
         public bool IsKeystone => Keystone != KeystoneId.None;
         public string Desc => IsKeystone ? Keystones.Def[Keystone].Desc : "";
+
+        // stable per-boon seed (deterministic across runs) — spreads uncurated axes across domain patrons
+        internal int Seed { get { int h = 17; foreach (var r in Rolls) { h = unchecked(h * 31 + (int)r.Axis); h = unchecked(h * 31 + r.Net); } return h & 0x7fffffff; } }
 
         // Name: biggest gift's adjective + biggest cost's noun (or the gift's own noun if there's no cost).
         public string Name
@@ -412,7 +475,7 @@ namespace EnvReporter
                     else if (r.Net < 0 && (!hasT || r.Net < take.Net)) { take = r; hasT = true; }
                 }
                 if (!hasG && !hasT) return "Hollow Boon of Nothing";   // shouldn't happen (RollNumeric floors a gift)
-                string patron = Rarity >= 2 ? Axes.Patron(give.Axis) + "'s " : "";   // Rare+ only; keystones handled above
+                string patron = Rarity >= 2 ? Axes.Patron(give.Axis, Seed) + "'s " : "";   // Rare+ only; keystones handled above
                 // suffix is ALWAYS a gerund ("of Wounding", not "of the Wound"), with a noun fallback
                 string Ger(BoonAxis ax, bool asTake) =>
                     Axes.Gerund.TryGetValue(ax, out var g) ? (asTake ? g.Take : g.Give)
@@ -530,6 +593,18 @@ namespace EnvReporter
             }
             var b = new Boon();
             foreach (var kv in net) if (kv.Value != 0) b.Rolls.Add(new AxisRoll { Axis = kv.Key, Net = kv.Value });
+            // a SINGLE boon's resistance can never reach VeryResistant: clamp categorical net to one below the
+            // ladder's top step (14), so one card tops out at "Resistant" — VeryResistant comes only from
+            // accumulating multiple resist boons (Totals sums them).
+            for (int i = 0; i < b.Rolls.Count; i++)
+            {
+                var r = b.Rolls[i];
+                if (Axes.Def[r.Axis].Categorical)
+                {
+                    int cl = Math.Clamp(r.Net, -(Axes.ResistVeryThreshold - 1), Axes.ResistVeryThreshold - 1);
+                    if (cl != r.Net) b.Rolls[i] = new AxisRoll { Axis = r.Axis, Net = cl };
+                }
+            }
             // categorical (resistance) rolls below ±ResistFloor map to Normal — no effect, and would render blank → drop them
             b.Rolls.RemoveAll(r => Axes.Def[r.Axis].Categorical && Math.Abs(r.Net) < Axes.ResistFloor);
             // guarantee a meaningful single gift: base axis ≥ +1, categorical ≥ +ResistFloor (Slightly resistant)
@@ -552,9 +627,9 @@ namespace EnvReporter
             foreach (var r in b.Rolls)
                 if (r.Net > 0) { g++; sumG += r.Net; } else { t++; sumT += -r.Net; }
             float vs = (g - t) + (sumG - sumT) / 4f;
-            int valueTier = vs >= 6f ? 2 : vs >= 3f ? 1 : 0;
+            int valueTier = vs >= BoonCfg.RareValueThreshold ? 2 : vs >= BoonCfg.MagicValueThreshold ? 1 : 0;
             int rarity = Math.Max(countTier, valueTier);
-            if (b.Rolls.Any(r => Axes.Def[r.Axis].General)) rarity = Math.Max(rarity, 2);   // any general → Rare
+            if (b.Rolls.Any(r => Axes.Def[r.Axis].General)) rarity = Math.Max(rarity, 1);   // 0.6.2: any general → Magic (was Rare — rares were too common); count/value tiers can still push it to Rare
             return rarity;
         }
 
@@ -652,7 +727,49 @@ namespace EnvReporter
                 if (b.IsKeystone) continue;
                 foreach (var r in b.Rolls) t[r.Axis] += r.Net;
             }
+            // patron set bonuses fold into the axis totals so they both take effect (Apply) and show (sheet)
+            foreach (var sb in PatronSetBonuses()) t[sb.axis] += sb.bonus;
             return t;
+        }
+
+        // the dominant gift axis of a numeric boon (its biggest give), or null for keystones / all-cost boons
+        static BoonAxis? DominantGift(Boon b)
+        {
+            if (b.IsKeystone) return null;
+            BoonAxis best = default; int bestNet = 0; bool has = false;
+            foreach (var r in b.Rolls)
+                if (r.Net > 0 && (!has || r.Net > bestNet)) { best = r.Axis; bestNet = r.Net; has = true; }
+            return has ? best : (BoonAxis?)null;
+        }
+
+        // count of owned RARE+ numeric boons per patron name (by dominant-gift patron). Only Rare+ boons
+        // visibly carry a patron name, so only they count toward the set — matches what the player sees and
+        // keeps the set a real collection goal (not inflated by every common/magic roll).
+        public Dictionary<string, int> PatronCounts()
+        {
+            var d = new Dictionary<string, int>();
+            foreach (var b in Boons)
+            {
+                if (b.Rarity < 2) continue;          // Rare+ only
+                var g = DominantGift(b);
+                if (g == null) continue;
+                string p = Axes.Patron(g.Value, b.Seed);
+                d.TryGetValue(p, out int c); d[p] = c + 1;
+            }
+            return d;
+        }
+
+        // per-patron bonus = round(k * n^2) to the patron's signature axis, shown from the first Rare (n>=1)
+        // so the section appears as soon as you own a rare of a patron and grows quadratically as you collect.
+        public List<(string patron, int count, BoonAxis axis, int bonus)> PatronSetBonuses()
+        {
+            var list = new List<(string, int, BoonAxis, int)>();
+            foreach (var kv in PatronCounts())
+            {
+                int bonus = Mathf.RoundToInt(BoonCfg.PatronSetBonusK * kv.Value * kv.Value);
+                if (bonus != 0) list.Add((kv.Key, kv.Value, Axes.PatronSignature(kv.Key), bonus));
+            }
+            return list;
         }
     }
 

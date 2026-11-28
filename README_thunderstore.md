@@ -33,6 +33,7 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
    - Clear the skies
    - Walk on water
    - Bless your crops
+   - Invoke the gods' bounty
    - Tame the flock
    - Ripen the mead
    - Kindle nearby fires
@@ -63,7 +64,7 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
 
 ## Configuration
 
-Settings live in `BepInEx/config/Pilgrim.yaml` and hot-reload on save.
+Settings live in `BepInEx/config/Pilgrim.yaml` and hot-reload on save. On a server, the server's settings are authoritative and apply to all connected players.
 
 ## Source
 

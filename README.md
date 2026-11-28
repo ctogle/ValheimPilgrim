@@ -33,6 +33,7 @@ Pilgrim introduces new mechanics that make it easier to avoid backtracking.
    - Clear the skies
    - Walk on water
    - Bless your crops
+   - Invoke the gods' bounty
    - Tame the flock
    - Ripen the mead
    - Kindle nearby fires
